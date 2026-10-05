@@ -11,17 +11,15 @@
 
 ## Results
 
-Normalized, activated, gated, and projected outputs were bitwise exact. The benchmark used 3 warmups and 12 samples per arm.
+Normalized, activated, gated, and projected outputs were bitwise exact. Five independent benchmark invocations used 3 warmups and 12 samples per arm.
 
-- Sequential control device p50: 229.385 us.
-- Batched candidate device p50: 155.375 us.
-- Device p50 improvement: 47.63%.
-- Host p50 improvement: 42.55%.
-- Both batched measurements beat the bracketed control average; the component integration gate passed.
+- Device p50 improvements: 47.63%, 54.97%, 46.97%, 57.62%, and 53.19% (median 53.19%).
+- Host p50 improvements: 42.55%, 41.73%, 41.20%, 45.02%, and 42.17% (median 42.17%).
+- Both batched measurements beat the bracketed control average in all five invocations; every component integration gate passed.
 
 ## Negative and limiting evidence
 
-The final sequential arm contained an approximately 36.6 ms outlier. This test covers a 64-token tail, not decode-one-token or online scheduler behavior.
+The final sequential arms contained approximately 36–44 ms outliers. The robust median direction is repeatable, but the test covers a 64-token tail, not decode-one-token or online scheduler behavior.
 
 ## Decision
 
