@@ -1,0 +1,186 @@
+{
+  "schema_version": "statecentric-native-mod-v1",
+  "mod_id": "qwen38.gdn-dual-sequence-output-tail",
+  "version": "0.1.0",
+  "title": "Qwen3.8 dual-sequence GDN output-tail batching",
+  "summary": "Keeps the stateful recurrent GDN core at exact per-sequence M64 geometry while batching the stateless RMSNorm, gating, and output projection tail across two Qwen3.8-27B sequences.",
+  "status": "experimental",
+  "default_enabled": false,
+  "owners": ["Qixin-Gaoke/native-engine"],
+  "target": {
+    "engine": {
+      "repository": "Qixin-Gaoke/statecentric-ascend-engine",
+      "candidate_revisions": ["r210"]
+    },
+    "model": {
+      "id": "Qwen/Qwen3.8-27B",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    },
+    "topology": {
+      "world_size": 4,
+      "tensor_parallel_size": 2,
+      "pipeline_parallel_size": 2
+    },
+    "accelerator": {
+      "vendor": "Huawei Ascend",
+      "device_count": 4
+    }
+  },
+  "activation": {
+    "mode": "environment-and-artifact-binding",
+    "status": "manual-engine-route",
+    "environment": {
+      "STATECENTRIC_QWEN38_GDN_BATCHED_PROJECTION_V1": "1",
+      "STATECENTRIC_QWEN38_GDN_DUAL_SEQUENCE_TAIL_V10": "1"
+    },
+    "artifacts": [
+      {
+        "role": "candidate-manifest",
+        "uri": "file:///data/statecentric-builds/qwen38-tp2pp2-candidate-r210/candidate-manifest-r001.json",
+        "sha256": "df1e6e03d7f55e79c99a0218176ce8d9abd3e25549d859096ef884fbe4dd88d9"
+      },
+      {
+        "role": "gdn-provider",
+        "uri": "file:///data/statecentric-builds/qwen38-tp2pp2-candidate-r210/libstatecentric_qwen38_gdn_provider.so",
+        "sha256": "474dd9462c40e13ae15accfe19d6e57685a29a21eea346d25ae69af43c267459"
+      },
+      {
+        "role": "runtime-contract",
+        "uri": "file:///data/statecentric-builds/qwen38-tp2pp2-candidate-r210/gdn-dual-sequence-tail-v10.json",
+        "sha256": "52bec9162837fd6dc306097e117ad223be886e7de6dcc7f9162cd2b98208666e"
+      }
+    ],
+    "requires": ["qwen38.gdn-batched-projection-v1"],
+    "conflicts": [
+      "qwen38.gdn-ex-sync-event-pool",
+      "qwen38.gdn-parallel-batched-projection-v2",
+      "qwen38.gdn-output-tail-provider-replacement"
+    ]
+  },
+  "evidence": {
+    "correctness": [
+      {
+        "kind": "correctness",
+        "uri": "file:///home/shuhao/statecentric-ascend-engine/results/qwen38-native-r208b-dual-sequence-tail-20260902-r208b-component/component.stdout",
+        "sha256": "d316155147b4e85ba8c679e94dc8092f1ddb9af717e1d907264f1aff6441a827",
+        "summary": "The exact component probe matched 393,216 normalized, activated, and gated BF16 elements plus 655,360 output elements with zero mismatches and zero maximum absolute error."
+      },
+      {
+        "kind": "correctness",
+        "uri": "file:///home/shuhao/statecentric-ascend-engine/results/qwen38-native-r153-r210-dual-tail-abba-20260902-r211-gate/correctness.json",
+        "sha256": "dd00603d5e921bd89725229a2cda1211231ec09038740a21e5fb3c9b6f8da603",
+        "summary": "The bounded r153,r210,r210,r153 online gate produced exact per-request output identities for all 16 measured BFCL-multiple requests and a stable r210 assembly fingerprint."
+      },
+      {
+        "kind": "correctness",
+        "uri": "file:///home/shuhao/statecentric-ascend-engine/results/qwen38-native-r153-r210-a1a4-interleaved-20260902-r212-analysis/result.json",
+        "sha256": "162bd173cd6f0675181e6846cf02b0a7dceda2c2b6471e48be901d41590a838f",
+        "summary": "The A1-A4 ABBA gate admitted exact outputs, 192 of 192 successful requests, stable identities and assemblies, clean capacity, NPU custody, and successful r113 restoration."
+      }
+    ],
+    "benefits": [
+      {
+        "scope": {
+          "family": "gdn-output-tail-component",
+          "concurrency": 2,
+          "max_tokens": 64,
+          "repetitions": 12,
+          "protocol": "exact component C0,H0,H1,C1 with three warmups per arm"
+        },
+        "baseline": "two sequential per-sequence output tails",
+        "metrics": [
+          {
+            "name": "device_event_p50_us",
+            "candidate_delta_percent": -31.906394470622,
+            "beneficial_direction": true
+          },
+          {
+            "name": "host_wall_p50_us",
+            "candidate_delta_percent": -27.400798506765,
+            "beneficial_direction": true
+          }
+        ],
+        "evidence": {
+          "kind": "performance",
+          "uri": "file:///home/shuhao/statecentric-ascend-engine/results/qwen38-native-r209-dual-sequence-tail-benchmark-20260902-r209-component/component.stdout",
+          "sha256": "414bf3b2483db44963454a0c4985ebf01ca5b0076b2624d358ae3f5dfcce413a",
+          "summary": "The exact component benchmark reduced device-event p50 from 194.005 to 132.105 microseconds and host-wall p50 from 238.007 to 172.791 microseconds; it explicitly permits no online performance claim."
+        }
+      }
+    ],
+    "tradeoffs": [
+      {
+        "scope": {
+          "family": "a1-a4: wildchat,bfcl_simple,bfcl_parallel,bfcl_multiple",
+          "concurrency": 4,
+          "max_tokens": 64,
+          "repetitions": 3,
+          "protocol": "interleaved ABBA r153,r210,r210,r153"
+        },
+        "baseline": "r153",
+        "metrics": [
+          {
+            "name": "summed_cell_wall_s",
+            "candidate_delta_percent": 1.246116323481,
+            "beneficial_direction": false
+          },
+          {
+            "name": "output_throughput_tok_s",
+            "candidate_delta_percent": -1.230779380712,
+            "beneficial_direction": false
+          },
+          {
+            "name": "mean_ttft_s",
+            "candidate_delta_percent": 2.524984987608,
+            "beneficial_direction": false
+          },
+          {
+            "name": "mean_tpot_s",
+            "candidate_delta_percent": 0.518938025255,
+            "beneficial_direction": false
+          },
+          {
+            "name": "mean_e2e_s",
+            "candidate_delta_percent": 1.270258851230,
+            "beneficial_direction": false
+          }
+        ],
+        "evidence": {
+          "kind": "performance",
+          "uri": "file:///home/shuhao/statecentric-ascend-engine/results/qwen38-native-r153-r210-a1a4-interleaved-20260902-r212-analysis/result.json",
+          "sha256": "162bd173cd6f0675181e6846cf02b0a7dceda2c2b6471e48be901d41590a838f",
+          "summary": "Combined output throughput regressed 1.2308%; early and late pair directions disagreed, and no workload family had a positive combined throughput ratio, so default promotion was rejected."
+        }
+      }
+    ],
+    "diagnostics": [
+      {
+        "kind": "diagnostic",
+        "uri": "file:///home/shuhao/statecentric-ascend-engine/results/qwen38-native-r153-r210-dual-tail-abba-20260902-r211-gate/completion.json",
+        "sha256": "4f65958187b38b92437420341df4ee8c1ede5d5e36bdaf09b2411b9b3246eafe",
+        "summary": "The bounded online ABBA was approximately neutral with TTFT and TPOT moving in opposite directions; it established correctness but not a service-level speedup."
+      }
+    ]
+  },
+  "guardrails": {
+    "explicit_opt_in": true,
+    "fail_closed": true,
+    "default_promotion_allowed": false,
+    "scope_expansion_requires_new_evidence": true,
+    "rollback": {
+      "target_revision": "r153",
+      "procedure": "Disable STATECENTRIC_QWEN38_GDN_DUAL_SEQUENCE_TAIL_V10 and restore the engine's pinned r153 candidate launcher; use r113 for the mandatory service recovery path."
+    }
+  },
+  "claims": [
+    "In the recorded exact two-sequence, 64-token component benchmark, output-tail batching reduced device-event p50 by 31.9064% and host-wall p50 by 27.4008% versus two sequential tails.",
+    "The recorded online BFCL-multiple gate supports exact output equivalence and stable assembly only; it does not support a service-level performance improvement claim.",
+    "Across the recorded A1-A4 concurrency-4, max-tokens-64 ABBA gate, r210 regressed combined output throughput by 1.2308% versus r153 and must remain disabled by default."
+  ],
+  "provenance": {
+    "created_at": "2026-09-02T01:20:00+08:00",
+    "source_repository": "Qixin-Gaoke/statecentric-ascend-engine",
+    "source_workspace": "/home/shuhao/statecentric-ascend-engine",
+    "evidence_policy": "Raw runs remain outside Git; every activation and evidence reference is SHA-256 pinned. The positive claim is component-local, while online correctness and the negative A1-A4 result bound deployment scope."
+  }
+}

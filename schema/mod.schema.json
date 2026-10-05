@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Qixin-Gaoke/statecentric-native-mods/schema/mod.schema.json",
+  "title": "State-Centric Native Mod v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mod_id",
+    "version",
+    "title",
+    "summary",
+    "status",
+    "default_enabled",
+    "owners",
+    "target",
+    "activation",
+    "evidence",
+    "guardrails",
+    "claims",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {"const": "statecentric-native-mod-v1"},
+    "mod_id": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"},
+    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "title": {"type": "string", "minLength": 3},
+    "summary": {"type": "string", "minLength": 20},
+    "status": {"enum": ["experimental", "scoped", "stable", "deprecated"]},
+    "default_enabled": {"const": false},
+    "owners": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "target": {"$ref": "#/$defs/target"},
+    "activation": {"$ref": "#/$defs/activation"},
+    "evidence": {"$ref": "#/$defs/evidence"},
+    "guardrails": {"$ref": "#/$defs/guardrails"},
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 20}
+    },
+    "provenance": {"$ref": "#/$defs/provenance"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "uri", "sha256", "summary"],
+      "properties": {
+        "kind": {"enum": ["correctness", "performance", "profile", "diagnostic", "custody"]},
+        "uri": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "summary": {"type": "string", "minLength": 10}
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "candidate_delta_percent", "beneficial_direction"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "candidate_delta_percent": {"type": "number"},
+        "beneficial_direction": {"type": "boolean"}
+      }
+    },
+    "workload_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "concurrency", "max_tokens", "repetitions", "protocol"],
+      "properties": {
+        "family": {"type": "string", "minLength": 1},
+        "concurrency": {"type": "integer", "minimum": 1},
+        "max_tokens": {"type": "integer", "minimum": 1},
+        "repetitions": {"type": "integer", "minimum": 1},
+        "protocol": {"type": "string", "minLength": 3},
+        "arrival_gap_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "performance_envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "baseline", "metrics", "evidence"],
+      "properties": {
+        "scope": {"$ref": "#/$defs/workload_scope"},
+        "baseline": {"type": "string", "minLength": 1},
+        "metrics": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/metric"}
+        },
+        "evidence": {"$ref": "#/$defs/evidence_ref"}
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "model", "topology", "accelerator"],
+      "properties": {
+        "engine": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "candidate_revisions"],
+          "properties": {
+            "repository": {"type": "string", "minLength": 3},
+            "candidate_revisions": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^r[0-9]+$"}
+            }
+          }
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "revision"],
+          "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "revision": {"type": "string", "minLength": 7}
+          }
+        },
+        "topology": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["world_size", "tensor_parallel_size", "pipeline_parallel_size"],
+          "properties": {
+            "world_size": {"type": "integer", "minimum": 1},
+            "tensor_parallel_size": {"type": "integer", "minimum": 1},
+            "pipeline_parallel_size": {"type": "integer", "minimum": 1}
+          }
+        },
+        "accelerator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["vendor", "device_count"],
+          "properties": {
+            "vendor": {"type": "string", "minLength": 1},
+            "device_count": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "uri", "sha256"],
+      "properties": {
+        "role": {"type": "string", "minLength": 1},
+        "uri": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "status", "environment", "artifacts", "requires", "conflicts"],
+      "properties": {
+        "mode": {"enum": ["environment-and-artifact-binding", "assembly-provider"]},
+        "status": {"enum": ["manual-engine-route", "loader-supported"]},
+        "environment": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[A-Z][A-Z0-9_]*$"},
+          "additionalProperties": {"type": "string"}
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/artifact"}
+        },
+        "requires": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "conflicts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["correctness", "benefits", "tradeoffs"],
+      "properties": {
+        "correctness": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidence_ref"}
+        },
+        "benefits": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/performance_envelope"}
+        },
+        "tradeoffs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/performance_envelope"}
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidence_ref"}
+        }
+      }
+    },
+    "guardrails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "explicit_opt_in",
+        "fail_closed",
+        "default_promotion_allowed",
+        "scope_expansion_requires_new_evidence",
+        "rollback"
+      ],
+      "properties": {
+        "explicit_opt_in": {"const": true},
+        "fail_closed": {"const": true},
+        "default_promotion_allowed": {"const": false},
+        "scope_expansion_requires_new_evidence": {"const": true},
+        "rollback": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["target_revision", "procedure"],
+          "properties": {
+            "target_revision": {"type": "string", "pattern": "^r[0-9]+$"},
+            "procedure": {"type": "string", "minLength": 10}
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["created_at", "source_repository", "source_workspace", "evidence_policy"],
+      "properties": {
+        "created_at": {"type": "string", "format": "date-time"},
+        "source_repository": {"type": "string", "minLength": 3},
+        "source_workspace": {"type": "string", "minLength": 1},
+        "evidence_policy": {"type": "string", "minLength": 10}
+      }
+    }
+  }
+}

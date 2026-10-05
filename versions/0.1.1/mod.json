@@ -1,0 +1,149 @@
+{
+  "schema_version": "statecentric-native-mod-v1",
+  "mod_id": "qwen38.gdn-dual-sequence-output-tail",
+  "version": "0.1.1",
+  "title": "Qwen3.8 dual-sequence GDN output-tail batching (corrected)",
+  "summary": "Corrects the V10 activation record: r210 did not forward the feature flag into workers, while activation-fixed r215 batches the full stateless output tail only as an explicitly deprecated experiment.",
+  "status": "deprecated",
+  "default_enabled": false,
+  "owners": ["Qixin-Gaoke/native-engine"],
+  "target": {
+    "engine": {
+      "repository": "Qixin-Gaoke/statecentric-ascend-engine",
+      "candidate_revisions": ["r215"]
+    },
+    "model": {
+      "id": "Qwen/Qwen3.8-27B",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    },
+    "topology": {
+      "world_size": 4,
+      "tensor_parallel_size": 2,
+      "pipeline_parallel_size": 2
+    },
+    "accelerator": {"vendor": "Huawei Ascend", "device_count": 4}
+  },
+  "activation": {
+    "mode": "environment-and-artifact-binding",
+    "status": "manual-engine-route",
+    "environment": {
+      "STATECENTRIC_QWEN38_GDN_BATCHED_PROJECTION_V1": "1",
+      "STATECENTRIC_QWEN38_GDN_DUAL_SEQUENCE_TAIL_V10": "1",
+      "STATECENTRIC_QWEN38_GDN_PROJECTION_ONLY_TAIL_V11": "0"
+    },
+    "artifacts": [
+      {
+        "role": "candidate-manifest",
+        "uri": "file:///data/statecentric-builds/qwen38-tp2pp2-candidate-r215/candidate-manifest-r001.json",
+        "sha256": "cf98d25779cea88f6b3dc64f2671ae434281ab98c01f3ddf257b9df80b39fb62"
+      },
+      {
+        "role": "gdn-provider",
+        "uri": "file:///data/statecentric-builds/qwen38-tp2pp2-candidate-r215/libstatecentric_qwen38_gdn_provider.so",
+        "sha256": "474dd9462c40e13ae15accfe19d6e57685a29a21eea346d25ae69af43c267459"
+      },
+      {
+        "role": "runtime-contract",
+        "uri": "file:///data/statecentric-builds/qwen38-tp2pp2-candidate-r215/gdn-dual-sequence-tail-v10.json",
+        "sha256": "52bec9162837fd6dc306097e117ad223be886e7de6dcc7f9162cd2b98208666e"
+      },
+      {
+        "role": "activation-contract",
+        "uri": "file:///data/statecentric-builds/qwen38-tp2pp2-candidate-r215/gdn-dual-sequence-tail-activation-v10.json",
+        "sha256": "7461c64b20b31cc7ae1e61f74754f649b7868ed35ade50d4cbf920b1d701d360"
+      }
+    ],
+    "requires": ["qwen38.gdn-batched-projection-v1"],
+    "conflicts": [
+      "qwen38.gdn-projection-only-output-tail",
+      "qwen38.gdn-output-tail-provider-replacement"
+    ]
+  },
+  "evidence": {
+    "correctness": [
+      {
+        "kind": "correctness",
+        "uri": "file:///home/shuhao/statecentric-ascend-engine/results/qwen38-native-r153-r215-dual-tail-abba-20260902-r216b-gate/correctness.json",
+        "sha256": "33e5c85d28c4ee4417469a6ec9b0b612b07ffc25da1df69c713c1cd05017e874",
+        "summary": "Activation-fixed r215 produced exact per-request outputs across all 16 measured BFCL-multiple requests and a stable active V10 assembly fingerprint."
+      }
+    ],
+    "benefits": [
+      {
+        "scope": {
+          "family": "gdn-output-tail-component",
+          "concurrency": 2,
+          "max_tokens": 64,
+          "repetitions": 12,
+          "protocol": "exact component C0,H0,H1,C1 with three warmups per arm"
+        },
+        "baseline": "two sequential per-sequence output tails",
+        "metrics": [
+          {"name": "device_event_p50_us", "candidate_delta_percent": -31.906394470622, "beneficial_direction": true},
+          {"name": "host_wall_p50_us", "candidate_delta_percent": -27.400798506765, "beneficial_direction": true}
+        ],
+        "evidence": {
+          "kind": "performance",
+          "uri": "file:///home/shuhao/statecentric-ascend-engine/results/qwen38-native-r209-dual-sequence-tail-benchmark-20260902-r209-component/component.stdout",
+          "sha256": "414bf3b2483db44963454a0c4985ebf01ca5b0076b2624d358ae3f5dfcce413a",
+          "summary": "The isolated full-tail component is exact and faster; this component-local result permits no online performance claim."
+        }
+      }
+    ],
+    "tradeoffs": [
+      {
+        "scope": {
+          "family": "bfcl_multiple",
+          "concurrency": 4,
+          "max_tokens": 32,
+          "repetitions": 1,
+          "protocol": "activation-fixed ABBA r153,r215,r215,r153",
+          "arrival_gap_ms": 100
+        },
+        "baseline": "r153",
+        "metrics": [
+          {"name": "wall_s", "candidate_delta_percent": 2.0113503669744404, "beneficial_direction": false},
+          {"name": "output_throughput_tok_s", "candidate_delta_percent": -1.9716927182503174, "beneficial_direction": false},
+          {"name": "mean_ttft_s", "candidate_delta_percent": 3.7484404068679478, "beneficial_direction": false},
+          {"name": "mean_tpot_s", "candidate_delta_percent": 0.21048792267830407, "beneficial_direction": false},
+          {"name": "mean_e2e_s", "candidate_delta_percent": 2.0601052370190054, "beneficial_direction": false}
+        ],
+        "evidence": {
+          "kind": "performance",
+          "uri": "file:///home/shuhao/statecentric-ascend-engine/results/qwen38-native-r153-r215-dual-tail-abba-20260902-r216b-gate/completion.json",
+          "sha256": "a572a18a763dfc31fd23c480508f7f1ad4b5a99d417ee79da2cebe540a2bf86c",
+          "summary": "Active V10 regressed bounded wall, throughput, TTFT, TPOT, and E2E means; early and late pair directions were inconsistent."
+        }
+      }
+    ],
+    "diagnostics": [
+      {
+        "kind": "profile",
+        "uri": "file:///home/shuhao/statecentric-ascend-engine/results/qwen38-native-r153-r215-dependency-delta-20260902-r218-analysis/analysis.json",
+        "sha256": "28751c8d1bd611e7ca9c6accf18c7a48b3b955868260efd0a901b0513169ba1d",
+        "summary": "Matched active profiling proves the full RMSNorm, SiLU, Mul, and projection tail migrated from child streams to the aggregate stream."
+      }
+    ]
+  },
+  "guardrails": {
+    "explicit_opt_in": true,
+    "fail_closed": true,
+    "default_promotion_allowed": false,
+    "scope_expansion_requires_new_evidence": true,
+    "rollback": {
+      "target_revision": "r153",
+      "procedure": "Disable STATECENTRIC_QWEN38_GDN_DUAL_SEQUENCE_TAIL_V10 and restore pinned r153; use r113 for mandatory service recovery."
+    }
+  },
+  "claims": [
+    "Version 0.1.0's r210 online results are superseded because the V10 environment flag was not forwarded into worker containers and the fallback path ran instead.",
+    "Activation-fixed r215 is exact but regresses the recorded bounded BFCL-multiple means and has no valid active A1-A4 performance claim.",
+    "The full-tail V10 design is deprecated in favor of narrower experiments and must remain disabled by default."
+  ],
+  "provenance": {
+    "created_at": "2026-09-02T03:08:54+08:00",
+    "source_repository": "Qixin-Gaoke/statecentric-ascend-engine",
+    "source_workspace": "/home/shuhao/statecentric-ascend-engine",
+    "evidence_policy": "Published 0.1.0 is immutable. This corrective version binds activation-fixed r215 evidence, retracts standing from V10-off r210 online runs, and records the missing active A1-A4 evidence."
+  }
+}

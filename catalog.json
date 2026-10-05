@@ -1,0 +1,22 @@
+{
+  "schema_version": "statecentric-native-mod-catalog-v1",
+  "repository": "qwen38-gdn-dual-sequence-output-tail",
+  "mods": [
+    {
+      "mod_id": "qwen38.gdn-dual-sequence-output-tail",
+      "version": "0.1.0",
+      "manifest": "versions/0.1.0/mod.json",
+      "sha256": "2f0fb41e564bb1f2076b064f3da3df7a0747904cb24dcf3f5b6a9898c8d31d44",
+      "status": "experimental",
+      "default_enabled": false
+    },
+    {
+      "mod_id": "qwen38.gdn-dual-sequence-output-tail",
+      "version": "0.1.1",
+      "manifest": "versions/0.1.1/mod.json",
+      "sha256": "039f446150d64ed51a9e71ecb762d6ab6fd97bbb6b8eca88cceb6398b6ab8ce1",
+      "status": "deprecated",
+      "default_enabled": false
+    }
+  ]
+}
