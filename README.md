@@ -14,6 +14,9 @@ The proposal author is unverified: `Qwen3.8` identifies the target model family,
 - The pinned native provider and policy-header source snapshot from StateAxis commit `59c4e51315df2fce0c8978820b1e51c2bf78e169`.
 - Mechanism-specific freeze and telemetry scripts.
 - Validation tests that reject inherited qualification or invented proposal provenance.
+- Evidence notes retain both the historical online regression and newer bounded
+  component screens; see
+  [`evidence/2026-10-05-dual-tail-flat-output.md`](evidence/2026-10-05-dual-tail-flat-output.md).
 
 ## Validate
 
@@ -26,3 +29,7 @@ pytest -q
 ## Activation boundary
 
 Activation remains the manual engine/artifact route recorded in the manifest. Do not enable this mod in production or reinterpret component measurements as online gains.
+
+The newer flattened final projection refines the exact 2 x 64 chunk/prefill
+component only. It does not change the mod's deprecated, disabled-by-default
+status. Promotion still requires matched TP2 x PP2 AgentX online evidence.
