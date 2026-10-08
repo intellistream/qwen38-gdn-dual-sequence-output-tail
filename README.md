@@ -11,7 +11,10 @@ The proposal author is unverified: `Qwen3.8` identifies the target model family,
 ## Contents
 
 - Immutable version manifests and SHA-256 catalog bindings.
-- The pinned native provider and policy-header source snapshot from StateAxis commit `59c4e51315df2fce0c8978820b1e51c2bf78e169`.
+- The pinned provider, policy, benchmark, and test source snapshots from the
+  archived StateAxis refinement commit
+  `329b57d05ccb45e3b1523cb08b83ae6ff547576a`, plus reviewable patches for
+  both unique refinement commits.
 - Mechanism-specific freeze and telemetry scripts.
 - Validation tests that reject inherited qualification or invented proposal provenance.
 - Evidence notes retain both the historical online regression and newer bounded
@@ -32,4 +35,6 @@ Activation remains the manual engine/artifact route recorded in the manifest. Do
 
 The newer flattened final projection refines the exact 2 x 64 chunk/prefill
 component only. It does not change the mod's deprecated, disabled-by-default
-status. Promotion still requires matched TP2 x PP2 AgentX online evidence.
+status. The parent-stream decode-tail experiment is archived for review but
+has no performance qualification. Promotion still requires matched TP2 x PP2
+AgentX online evidence.

@@ -17,6 +17,14 @@
       "sha256": "039f446150d64ed51a9e71ecb762d6ab6fd97bbb6b8eca88cceb6398b6ab8ce1",
       "status": "deprecated",
       "default_enabled": false
+    },
+    {
+      "mod_id": "qwen38.gdn-dual-sequence-output-tail",
+      "version": "0.1.2",
+      "manifest": "versions/0.1.2/mod.json",
+      "sha256": "b2548fdf550af15bc5362bee460a7b933e048d7bcb831357b80a69d9665bbec4",
+      "status": "deprecated",
+      "default_enabled": false
     }
   ]
 }

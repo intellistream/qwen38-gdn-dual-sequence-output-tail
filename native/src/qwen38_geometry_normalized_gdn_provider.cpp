@@ -156,6 +156,9 @@ struct statecentric_qwen38_provider_handle_v1 {
   bool lane_anchored_packed_recurrent_v14 = false;
   bool graph_captured_lane_events_v15 = false;
   bool graph_single_follower_v16 = false;
+  bool eager_single_follower_v17 = false;
+  bool decode_flat_output_projection_v18 = false;
+  bool parent_local_decode_tail_v19 = false;
   std::atomic<std::uint64_t> packed_decode_submit_calls_v12{0};
   std::atomic<std::uint64_t> packed_decode_admitted_calls_v12{0};
   std::atomic<bool> packed_decode_admission_emitted_v12{false};
@@ -166,6 +169,12 @@ struct statecentric_qwen38_provider_handle_v1 {
   std::atomic<bool> graph_captured_lane_admission_emitted_v15{false};
   std::atomic<std::uint64_t> graph_single_follower_admissions_v16{0};
   std::atomic<bool> graph_single_follower_admission_emitted_v16{false};
+  std::atomic<std::uint64_t> eager_single_follower_admissions_v17{0};
+  std::atomic<bool> eager_single_follower_admission_emitted_v17{false};
+  std::atomic<std::uint64_t> decode_flat_output_admissions_v18{0};
+  std::atomic<bool> decode_flat_output_admission_emitted_v18{false};
+  std::atomic<std::uint64_t> parent_local_decode_tail_admissions_v19{0};
+  std::atomic<bool> parent_local_decode_tail_admission_emitted_v19{false};
   void* l2_gamma = nullptr;
   std::array<void*, 128> actual_lengths{};
   std::array<void*, 8> state_indices{};
@@ -456,6 +465,11 @@ Tensor MakeTensor(const std::vector<std::int64_t>& shape,
   return Tensor(tensor);
 }
 
+void WriteBestEffort(int descriptor, const char* data, std::size_t bytes) {
+  const ssize_t written = ::write(descriptor, data, bytes);
+  (void)written;
+}
+
 #ifdef STATECENTRIC_GDN_PREFILL_TENSOR_POOL_V1
 void* AllocatePrivate(statecentric_qwen38_event_v1* event, std::size_t bytes) {
   if (bytes == 0) return nullptr;
@@ -516,6 +530,22 @@ void* Allocate(statecentric_qwen38_event_v1* event, std::size_t bytes) {
   return value;
 #endif
 }
+
+Tensor CopyInt64MetadataTensor(statecentric_qwen38_event_v1* event,
+                               std::span<const std::int64_t> values,
+                               const char* operation) {
+  if (values.empty()) {
+    throw std::runtime_error(std::string(operation) + " cannot be empty");
+  }
+  const auto bytes = values.size_bytes();
+  void* device = Allocate(event, bytes);
+  CheckAcl(aclrtMemcpy(device, bytes, values.data(), bytes,
+                       ACL_MEMCPY_HOST_TO_DEVICE),
+           operation);
+  const auto elements = static_cast<std::int64_t>(values.size());
+  return MakeTensor({elements}, {1}, {elements}, ACL_INT64, device);
+}
+
 void FreeAllocations(statecentric_qwen38_event_v1* event) {
 #ifdef STATECENTRIC_GDN_PREFILL_TENSOR_POOL_V1
   for (const auto& lease : event->tensor_leases) {
@@ -573,7 +603,8 @@ void EmitLaneAnchoredFirstAdmissionV14(
           handle->lane_anchored_admitted_calls_v14.load(
               std::memory_order_relaxed)));
   if (length > 0 && static_cast<std::size_t>(length) < line.size()) {
-    (void)::write(STDERR_FILENO, line.data(), static_cast<std::size_t>(length));
+    WriteBestEffort(STDERR_FILENO, line.data(),
+                    static_cast<std::size_t>(length));
   }
 }
 
@@ -593,7 +624,8 @@ void EmitPackedDecodeFirstAdmissionV12(
           handle->packed_decode_admitted_calls_v12.load(
               std::memory_order_relaxed)));
   if (length > 0 && static_cast<std::size_t>(length) < line.size()) {
-    (void)::write(STDERR_FILENO, line.data(), static_cast<std::size_t>(length));
+    WriteBestEffort(STDERR_FILENO, line.data(),
+                    static_cast<std::size_t>(length));
   }
 }
 
@@ -610,7 +642,8 @@ void EmitGraphCapturedLaneFirstAdmissionV15(
           handle->graph_captured_lane_admissions_v15.load(
               std::memory_order_relaxed)));
   if (length > 0 && static_cast<std::size_t>(length) < line.size()) {
-    (void)::write(STDERR_FILENO, line.data(), static_cast<std::size_t>(length));
+    WriteBestEffort(STDERR_FILENO, line.data(),
+                    static_cast<std::size_t>(length));
   }
 }
 
@@ -628,7 +661,64 @@ void EmitGraphSingleFollowerFirstAdmissionV16(
           handle->graph_single_follower_admissions_v16.load(
               std::memory_order_relaxed)));
   if (length > 0 && static_cast<std::size_t>(length) < line.size()) {
-    (void)::write(STDERR_FILENO, line.data(), static_cast<std::size_t>(length));
+    WriteBestEffort(STDERR_FILENO, line.data(),
+                    static_cast<std::size_t>(length));
+  }
+}
+
+void EmitEagerSingleFollowerFirstAdmissionV17(
+    statecentric_qwen38_provider_handle_v1* handle) {
+  if (handle == nullptr) return;
+  std::array<char, 256> line{};
+  const int length = std::snprintf(
+      line.data(), line.size(),
+      "STATECENTRIC_QWEN38_GDN_EAGER_SINGLE_FOLLOWER_V17="
+      "{\"rank\":%u,\"eager_admissions\":%llu,\"events_per_layer\":4,"
+      "\"waits_per_layer\":4}\n",
+      handle->rank,
+      static_cast<unsigned long long>(
+          handle->eager_single_follower_admissions_v17.load(
+              std::memory_order_relaxed)));
+  if (length > 0 && static_cast<std::size_t>(length) < line.size()) {
+    WriteBestEffort(STDERR_FILENO, line.data(),
+                    static_cast<std::size_t>(length));
+  }
+}
+
+void EmitDecodeFlatOutputFirstAdmissionV18(
+    statecentric_qwen38_provider_handle_v1* handle) {
+  if (handle == nullptr) return;
+  std::array<char, 256> line{};
+  const int length = std::snprintf(
+      line.data(), line.size(),
+      "STATECENTRIC_QWEN38_GDN_DECODE_FLAT_OUTPUT_PROJECTION_V18="
+      "{\"rank\":%u,\"admitted_calls\":%llu,\"rows\":2}\n",
+      handle->rank,
+      static_cast<unsigned long long>(
+          handle->decode_flat_output_admissions_v18.load(
+              std::memory_order_relaxed)));
+  if (length > 0 && static_cast<std::size_t>(length) < line.size()) {
+    WriteBestEffort(STDERR_FILENO, line.data(),
+                    static_cast<std::size_t>(length));
+  }
+}
+
+void EmitParentLocalDecodeTailFirstAdmissionV19(
+    statecentric_qwen38_provider_handle_v1* handle) {
+  if (handle == nullptr) return;
+  std::array<char, 256> line{};
+  const int length = std::snprintf(
+      line.data(), line.size(),
+      "STATECENTRIC_QWEN38_GDN_PARENT_LOCAL_DECODE_TAIL_V19="
+      "{\"rank\":%u,\"admitted_calls\":%llu,\"rows\":2,"
+      "\"record_wait_edges_removed\":2}\n",
+      handle->rank,
+      static_cast<unsigned long long>(
+          handle->parent_local_decode_tail_admissions_v19.load(
+              std::memory_order_relaxed)));
+  if (length > 0 && static_cast<std::size_t>(length) < line.size()) {
+    WriteBestEffort(STDERR_FILENO, line.data(),
+                    static_cast<std::size_t>(length));
   }
 }
 
@@ -676,7 +766,8 @@ void EmitEventPoolRuntimeTelemetryLocked(
           handle->synchronization_event_pool_bundle_leases[3]));
   if (length <= 0 || static_cast<std::size_t>(length) >= line.size()) return;
   if (handle->event_pool_atomic_runtime_telemetry_v8) {
-    (void)::write(STDERR_FILENO, line.data(), static_cast<std::size_t>(length));
+    WriteBestEffort(STDERR_FILENO, line.data(),
+                    static_cast<std::size_t>(length));
   } else {
     (void)std::fwrite(line.data(), 1, static_cast<std::size_t>(length), stderr);
     std::fflush(stderr);
@@ -1281,7 +1372,8 @@ void LaneGdnOutputTailV13(
     void* recurrent_output_data, void* z_data, void* gamma_data,
     void* weight_data, void* output_data, std::int64_t tokens,
     std::int64_t value_heads, std::int64_t value, std::int64_t hidden,
-    aclrtStream stream, statecentric_qwen38_event_v1* event) {
+    void* deferred_gated_output_data, aclrtStream stream,
+    statecentric_qwen38_event_v1* event) {
   if (recurrent_output_data == nullptr || z_data == nullptr ||
       gamma_data == nullptr || weight_data == nullptr ||
       output_data == nullptr || tokens != 1 || value_heads != 24 ||
@@ -1305,7 +1397,9 @@ void LaneGdnOutputTailV13(
           "aclnnRmsNorm(GDN lane output v13)");
 
   void* activated_data = Allocate(event, value_elements);
-  void* gated_data = Allocate(event, value_elements);
+  void* gated_data = deferred_gated_output_data != nullptr
+                         ? deferred_gated_output_data
+                         : Allocate(event, value_elements);
   auto z = MakeTensor({tokens, value}, {value, 1}, {tokens, value}, ACL_BF16,
                       z_data);
   auto activated = MakeTensor({tokens, value}, {value, 1}, {tokens, value},
@@ -1331,6 +1425,7 @@ void LaneGdnOutputTailV13(
   void* mul_workspace = GDN_WORKSPACE(event, mul_bytes, kElementwiseWorkspace);
   CheckNn(aclnnMul(mul_workspace, mul_bytes, mul_executor, stream),
           "aclnnMul(GDN lane output v13)");
+  if (deferred_gated_output_data != nullptr) return;
   FlatMatmulSharedWeight(gated_data, weight_data, output_data, tokens, value,
                          hidden, stream, event,
                          "aclnnMatmul(GDN lane output projection v13)");
@@ -1397,9 +1492,9 @@ void BatchGdnOutputTail(void* recurrent_output_data, void* z_data,
   void* mul_workspace = GDN_WORKSPACE(event, mul_bytes, kElementwiseWorkspace);
   CheckNn(aclnnMul(mul_workspace, mul_bytes, mul_executor, stream),
           "aclnnMul(GDN dual-sequence tail v10)");
-  BatchMatmulSharedWeight(
-      gated_data, weight_data, output_data, batch, tokens, value, kHidden,
-      stream, event, "aclnnBatchMatMul(GDN dual-sequence output v10)");
+  FlatMatmulSharedWeight(
+      gated_data, weight_data, output_data, batch * tokens, value, kHidden,
+      stream, event, "aclnnMatmul(GDN flattened dual-sequence output v10)");
 }
 
 void Permute(const std::vector<std::int64_t>& input_shape,
@@ -1936,6 +2031,21 @@ int32_t Create(const statecentric_qwen38_host_v1* host,
   handle->graph_single_follower_v16 =
       graph_single_follower != nullptr &&
       std::strcmp(graph_single_follower, "1") == 0;
+  const char* eager_single_follower = std::getenv(
+      "STATECENTRIC_QWEN38_GDN_EAGER_SINGLE_FOLLOWER_V17");
+  handle->eager_single_follower_v17 =
+      eager_single_follower != nullptr &&
+      std::strcmp(eager_single_follower, "1") == 0;
+  const char* decode_flat_output_projection = std::getenv(
+      "STATECENTRIC_QWEN38_GDN_DECODE_FLAT_OUTPUT_PROJECTION_V18");
+  handle->decode_flat_output_projection_v18 =
+      decode_flat_output_projection != nullptr &&
+      std::strcmp(decode_flat_output_projection, "1") == 0;
+  const char* parent_local_decode_tail = std::getenv(
+      "STATECENTRIC_QWEN38_GDN_PARENT_LOCAL_DECODE_TAIL_V19");
+  handle->parent_local_decode_tail_v19 =
+      parent_local_decode_tail != nullptr &&
+      std::strcmp(parent_local_decode_tail, "1") == 0;
   if (handle->parallel_batched_projection_v2 &&
       !handle->batched_projection_v1) {
     delete handle;
@@ -2012,6 +2122,33 @@ int32_t Create(const statecentric_qwen38_host_v1* host,
     return Fail(STATECENTRIC_QWEN38_INVALID_ARGUMENT,
                 "Qwen3.8 graph single-follower v16 requires "
                 "graph-captured lane events v15",
+                out_error);
+  }
+  if (!statecentric::Qwen38GdnEagerSingleFollowerFeaturesValid(
+          handle->graph_single_follower_v16,
+          handle->eager_single_follower_v17)) {
+    delete handle;
+    return Fail(STATECENTRIC_QWEN38_INVALID_ARGUMENT,
+                "Qwen3.8 eager single-follower v17 requires graph "
+                "single-follower v16",
+                out_error);
+  }
+  if (!statecentric::Qwen38GdnDecodeFlatOutputProjectionFeaturesValid(
+          handle->eager_single_follower_v17,
+          handle->decode_flat_output_projection_v18)) {
+    delete handle;
+    return Fail(STATECENTRIC_QWEN38_INVALID_ARGUMENT,
+                "Qwen3.8 decode flat output projection v18 requires eager "
+                "single-follower v17",
+                out_error);
+  }
+  if (!statecentric::Qwen38GdnParentLocalDecodeTailFeaturesValid(
+          handle->decode_flat_output_projection_v18,
+          handle->parent_local_decode_tail_v19)) {
+    delete handle;
+    return Fail(STATECENTRIC_QWEN38_INVALID_ARGUMENT,
+                "Qwen3.8 parent-local decode tail v19 requires decode flat "
+                "output projection v18",
                 out_error);
   }
   if ((handle->synchronization_event_pool_v3 ||
@@ -2431,12 +2568,21 @@ int32_t Submit(statecentric_qwen38_provider_handle_v1* handle,
         lane_anchored_packed_decode_plan.lane_output_tail;
     const bool lane_packed_recurrent =
         lane_local_packed_recurrent || lane_anchored_packed_recurrent;
-    const auto captured_lane_stream_plan =
-        statecentric::PlanQwen38GdnCapturedLaneStreams(
+    const bool decode_flat_output_projection =
+        handle->decode_flat_output_projection_v18 &&
+        lane_anchored_packed_recurrent &&
+        !aggregate->model_ri_cross_stream_capture;
+    const bool parent_local_decode_tail =
+        handle->parent_local_decode_tail_v19 &&
+        decode_flat_output_projection;
+    const auto single_follower_stream_plan =
+        statecentric::PlanQwen38GdnSingleFollowerStreams(
             aggregate->model_ri_cross_stream_capture,
             handle->graph_single_follower_v16,
+            handle->eager_single_follower_v17,
             static_cast<unsigned>(state_count));
-    if (captured_lane_stream_plan.anchor_on_parent_stream) {
+    if (single_follower_stream_plan.anchor_on_parent_stream &&
+        aggregate->model_ri_cross_stream_capture) {
       handle->graph_single_follower_admissions_v16.fetch_add(
           1, std::memory_order_relaxed);
       bool expected = false;
@@ -2447,8 +2593,43 @@ int32_t Submit(statecentric_qwen38_provider_handle_v1* handle,
         EmitGraphSingleFollowerFirstAdmissionV16(handle);
       }
     }
+    if (single_follower_stream_plan.anchor_on_parent_stream &&
+        !aggregate->model_ri_cross_stream_capture &&
+        handle->eager_single_follower_v17) {
+      handle->eager_single_follower_admissions_v17.fetch_add(
+          1, std::memory_order_relaxed);
+      bool expected = false;
+      if (handle->eager_single_follower_admission_emitted_v17
+              .compare_exchange_strong(expected, true,
+                                       std::memory_order_acq_rel,
+                                       std::memory_order_relaxed)) {
+        EmitEagerSingleFollowerFirstAdmissionV17(handle);
+      }
+    }
+    if (decode_flat_output_projection) {
+      handle->decode_flat_output_admissions_v18.fetch_add(
+          1, std::memory_order_relaxed);
+      bool expected = false;
+      if (handle->decode_flat_output_admission_emitted_v18
+              .compare_exchange_strong(expected, true,
+                                       std::memory_order_acq_rel,
+                                       std::memory_order_relaxed)) {
+        EmitDecodeFlatOutputFirstAdmissionV18(handle);
+      }
+    }
+    if (parent_local_decode_tail) {
+      handle->parent_local_decode_tail_admissions_v19.fetch_add(
+          1, std::memory_order_relaxed);
+      bool expected = false;
+      if (handle->parent_local_decode_tail_admission_emitted_v19
+              .compare_exchange_strong(expected, true,
+                                       std::memory_order_acq_rel,
+                                       std::memory_order_relaxed)) {
+        EmitParentLocalDecodeTailFirstAdmissionV19(handle);
+      }
+    }
     const auto anchor_stream =
-        captured_lane_stream_plan.anchor_on_parent_stream
+        single_follower_stream_plan.anchor_on_parent_stream
             ? aggregate->stream
             : handle->sequence_streams.at(stream_plan->lane_by_sequence[0]);
     const auto follower_stream = handle->sequence_streams.at(
@@ -2507,7 +2688,8 @@ int32_t Submit(statecentric_qwen38_provider_handle_v1* handle,
             aggregate, static_cast<std::size_t>(tokens * kValue) *
                            sizeof(std::uint16_t));
       }
-      if (batch_output_projection_only) {
+      if (batch_output_projection_only ||
+          (decode_flat_output_projection && !parent_local_decode_tail)) {
         batched_gated_output = Allocate(
             aggregate, static_cast<std::size_t>(tokens * kValue) *
                            sizeof(std::uint16_t));
@@ -2576,14 +2758,15 @@ int32_t Submit(statecentric_qwen38_provider_handle_v1* handle,
       for (std::size_t sequence = 0; sequence < state_count; ++sequence) {
         const auto lane = stream_plan->lane_by_sequence[sequence];
         const auto sequence_stream =
-            captured_lane_stream_plan.anchor_on_parent_stream && sequence == 0
+            single_follower_stream_plan.anchor_on_parent_stream &&
+                    sequence == 0
                 ? aggregate->stream
                 : handle->sequence_streams.at(lane);
         if (sequence_stream == nullptr) {
           throw std::runtime_error("Qwen3.8 sequence lane stream is missing");
         }
         const bool parent_anchor_already_ready =
-            captured_lane_stream_plan.anchor_on_parent_stream &&
+            single_follower_stream_plan.anchor_on_parent_stream &&
             sequence == 0 &&
             (!parallel_project_qkv_z ||
              !handle->prune_parent_projection_waits_v4);
@@ -2780,7 +2963,7 @@ int32_t Submit(statecentric_qwen38_provider_handle_v1* handle,
                   reinterpret_cast<void*>(output.data)) +
                   token_offset * hidden_row_bytes,
               lane_local_packed_decode_plan.tokens_per_sequence, kValueHeads,
-              kValue, kHidden, sequence_stream,
+              kValue, kHidden, nullptr, sequence_stream,
               aggregate->sequence_events.at(sequence));
           CheckAcl(aclrtRecordEvent(lane_done, sequence_stream),
                    "aclrtRecordEvent(GDN lane output done v13)");
@@ -2793,46 +2976,71 @@ int32_t Submit(statecentric_qwen38_provider_handle_v1* handle,
             batched_beta, batched_gate,
             reinterpret_cast<void*>(recurrent_state.tensor.data),
             batched_recurrent_output, anchor_stream, aggregate);
-        const auto packed_ready = SynchronizationEvent(
-            aggregate, 2,
-            "aclrtCreateEvent(GDN anchored packed recurrent ready v14)");
-        CheckAcl(aclrtRecordEvent(packed_ready, anchor_stream),
-                 "aclrtRecordEvent(GDN anchored packed recurrent ready v14)");
-        CheckAcl(aclrtStreamWaitEvent(follower_stream, packed_ready),
-                 "aclrtStreamWaitEvent(GDN anchored packed recurrent ready v14)");
-        const auto z_row_bytes =
-            static_cast<std::size_t>(kValue) * sizeof(std::uint16_t);
-        for (std::size_t sequence = 0; sequence < state_count; ++sequence) {
-          const auto lane = stream_plan->lane_by_sequence[sequence];
-          const auto sequence_stream =
-              captured_lane_stream_plan.anchor_on_parent_stream &&
-                      sequence == 0
-                  ? aggregate->stream
-                  : handle->sequence_streams.at(lane);
-          const auto token_offset = token_offsets[sequence];
-          LaneGdnOutputTailV13(
-              static_cast<std::uint8_t*>(batched_recurrent_output) +
-                  token_offset * z_row_bytes,
-              static_cast<std::uint8_t*>(batched_z) +
-                  token_offset * z_row_bytes,
+        if (parent_local_decode_tail) {
+          BatchGdnOutputTail(
+              batched_recurrent_output, batched_z,
               reinterpret_cast<void*>(input[8].data),
               reinterpret_cast<void*>(input[9].data),
-              reinterpret_cast<std::uint8_t*>(
-                  reinterpret_cast<void*>(output.data)) +
-                  token_offset * hidden_row_bytes,
+              reinterpret_cast<void*>(output.data),
+              lane_anchored_packed_decode_plan.batch,
               lane_anchored_packed_decode_plan.tokens_per_sequence,
-              kValueHeads, kValue, kHidden, sequence_stream,
-              aggregate->sequence_events.at(sequence));
-          if (!captured_lane_stream_plan.anchor_on_parent_stream ||
-              sequence != 0) {
-            const auto lane_done = SynchronizationEvent(
-                aggregate, 3 + sequence,
-                "aclrtCreateEvent(GDN anchored lane output done v14)");
-            CheckAcl(aclrtRecordEvent(lane_done, sequence_stream),
-                     "aclrtRecordEvent(GDN anchored lane output done v14)");
-            CheckAcl(
-                aclrtStreamWaitEvent(aggregate->stream, lane_done),
-                "aclrtStreamWaitEvent(GDN anchored lane output done v14)");
+              kValueHeads, kValue, aggregate->stream, aggregate);
+        } else {
+          const auto packed_ready = SynchronizationEvent(
+              aggregate, 2,
+              "aclrtCreateEvent(GDN anchored packed recurrent ready v14)");
+          CheckAcl(aclrtRecordEvent(packed_ready, anchor_stream),
+                   "aclrtRecordEvent(GDN anchored packed recurrent ready v14)");
+          CheckAcl(
+              aclrtStreamWaitEvent(follower_stream, packed_ready),
+              "aclrtStreamWaitEvent(GDN anchored packed recurrent ready v14)");
+          const auto z_row_bytes =
+              static_cast<std::size_t>(kValue) * sizeof(std::uint16_t);
+          for (std::size_t sequence = 0; sequence < state_count; ++sequence) {
+            const auto lane = stream_plan->lane_by_sequence[sequence];
+            const auto sequence_stream =
+                single_follower_stream_plan.anchor_on_parent_stream &&
+                        sequence == 0
+                    ? aggregate->stream
+                    : handle->sequence_streams.at(lane);
+            const auto token_offset = token_offsets[sequence];
+            LaneGdnOutputTailV13(
+                static_cast<std::uint8_t*>(batched_recurrent_output) +
+                    token_offset * z_row_bytes,
+                static_cast<std::uint8_t*>(batched_z) +
+                    token_offset * z_row_bytes,
+                reinterpret_cast<void*>(input[8].data),
+                reinterpret_cast<void*>(input[9].data),
+                reinterpret_cast<std::uint8_t*>(
+                    reinterpret_cast<void*>(output.data)) +
+                    token_offset * hidden_row_bytes,
+                lane_anchored_packed_decode_plan.tokens_per_sequence,
+                kValueHeads, kValue, kHidden,
+                decode_flat_output_projection
+                    ? static_cast<std::uint8_t*>(batched_gated_output) +
+                          token_offset * z_row_bytes
+                    : nullptr,
+                sequence_stream,
+                aggregate->sequence_events.at(sequence));
+            if (!single_follower_stream_plan.anchor_on_parent_stream ||
+                sequence != 0) {
+              const auto lane_done = SynchronizationEvent(
+                  aggregate, 3 + sequence,
+                  "aclrtCreateEvent(GDN anchored lane output done v14)");
+              CheckAcl(aclrtRecordEvent(lane_done, sequence_stream),
+                       "aclrtRecordEvent(GDN anchored lane output done v14)");
+              CheckAcl(
+                  aclrtStreamWaitEvent(aggregate->stream, lane_done),
+                  "aclrtStreamWaitEvent(GDN anchored lane output done v14)");
+            }
+          }
+          if (decode_flat_output_projection) {
+            FlatMatmulSharedWeight(
+                batched_gated_output, reinterpret_cast<void*>(input[9].data),
+                reinterpret_cast<void*>(output.data),
+                static_cast<std::int64_t>(tokens), kValue, kHidden,
+                aggregate->stream, aggregate,
+                "aclnnMatmul(GDN flattened decode output v18)");
           }
         }
       } else if (batch_output_tail) {
@@ -2947,25 +3155,21 @@ int32_t Submit(statecentric_qwen38_provider_handle_v1* handle,
       cache_indices = {0};
     }
     std::vector<std::int64_t> initial_mode(state_count, 0);
-    IntArray query_starts_array(
-        aclCreateIntArray(query_starts.data(), query_starts.size()));
-    IntArray cache_indices_array(
-        aclCreateIntArray(cache_indices.data(), cache_indices.size()));
-    IntArray initial_state_array;
+    auto query_starts_tensor = CopyInt64MetadataTensor(
+        event, query_starts, "aclrtMemcpy(GDN conv query starts)");
+    auto cache_indices_tensor = CopyInt64MetadataTensor(
+        event, cache_indices, "aclrtMemcpy(GDN conv cache indices)");
+    Tensor initial_state_tensor;
     if (execution->context_tokens == 0) {
-      initial_state_array.reset(
-          aclCreateIntArray(initial_mode.data(), initial_mode.size()));
-    }
-    if (!query_starts_array || !cache_indices_array ||
-        (execution->context_tokens == 0 && !initial_state_array)) {
-      throw std::runtime_error("aclCreateIntArray(GDN conv) failed");
+      initial_state_tensor = CopyInt64MetadataTensor(
+          event, initial_mode, "aclrtMemcpy(GDN conv initial-state mode)");
     }
     std::uint64_t conv_bytes = 0;
     aclOpExecutor* conv_executor = nullptr;
     CheckNn(aclnnCausalConv1dGetWorkspaceSize(
                 qkv.get(), conv_weight.get(), nullptr, conv_state_tensor.get(),
-                query_starts_array.get(), cache_indices_array.get(),
-                initial_state_array.get(), nullptr, 1, -1,
+                query_starts_tensor.get(), cache_indices_tensor.get(),
+                initial_state_tensor.get(), nullptr, 1, -1,
                 execution->context_tokens == 0 ? 0 : 1, conv_output.get(),
                 &conv_bytes, &conv_executor),
             "aclnnCausalConv1dGetWorkspaceSize(GDN)");

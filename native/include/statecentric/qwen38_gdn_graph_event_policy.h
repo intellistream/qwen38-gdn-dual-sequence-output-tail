@@ -7,7 +7,7 @@ struct Qwen38GdnGraphEventPlan {
   bool create_fresh_ex_sync = false;
 };
 
-struct Qwen38GdnCapturedLaneStreamPlan {
+struct Qwen38GdnSingleFollowerStreamPlan {
   bool anchor_on_parent_stream = false;
   bool follower_on_auxiliary_stream = false;
   unsigned synchronization_events = 0;
@@ -27,16 +27,38 @@ inline constexpr bool Qwen38GdnGraphSingleFollowerFeaturesValid(
   return !graph_single_follower_v16 || graph_captured_lane_events_v15;
 }
 
-// The original two-auxiliary-lane graph needs five events and six waits per
-// GDN layer.  During model-RI replay those waits expand into CAPTURE_WAIT
-// tasks.  Keeping lane 0 on the parent stream removes its fork and join while
-// preserving lane 1 overlap around the packed recurrent midpoint.
-inline constexpr Qwen38GdnCapturedLaneStreamPlan
-PlanQwen38GdnCapturedLaneStreams(bool model_ri_capture_active,
-                                bool graph_single_follower_v16,
-                                unsigned state_count) noexcept {
-  if (model_ri_capture_active && graph_single_follower_v16 &&
-      state_count == 2) {
+inline constexpr bool Qwen38GdnEagerSingleFollowerFeaturesValid(
+    bool graph_single_follower_v16,
+    bool eager_single_follower_v17) noexcept {
+  return !eager_single_follower_v17 || graph_single_follower_v16;
+}
+
+inline constexpr bool Qwen38GdnDecodeFlatOutputProjectionFeaturesValid(
+    bool eager_single_follower_v17,
+    bool decode_flat_output_projection_v18) noexcept {
+  return !decode_flat_output_projection_v18 || eager_single_follower_v17;
+}
+
+inline constexpr bool Qwen38GdnParentLocalDecodeTailFeaturesValid(
+    bool decode_flat_output_projection_v18,
+    bool parent_local_decode_tail_v19) noexcept {
+  return !parent_local_decode_tail_v19 || decode_flat_output_projection_v18;
+}
+
+// The original two-auxiliary-lane path needs five events and six waits per GDN
+// layer. Keeping lane 0 on the parent stream removes its fork and join while
+// preserving lane 1 overlap around the packed recurrent midpoint. V16 applies
+// this topology to model-RI capture; V17 extends it to eager execution.
+inline constexpr Qwen38GdnSingleFollowerStreamPlan
+PlanQwen38GdnSingleFollowerStreams(bool model_ri_capture_active,
+                                  bool graph_single_follower_v16,
+                                  bool eager_single_follower_v17,
+                                  unsigned state_count) noexcept {
+  const bool captured_single_follower =
+      model_ri_capture_active && graph_single_follower_v16;
+  const bool eager_single_follower =
+      !model_ri_capture_active && eager_single_follower_v17;
+  if ((captured_single_follower || eager_single_follower) && state_count == 2) {
     return {true, true, 4, 4};
   }
   return {};

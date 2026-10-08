@@ -13,11 +13,11 @@
   },
   "implementation_source": {
     "repository": "Qixin-Gaoke/stateaxis",
-    "commit": "59c4e51315df2fce0c8978820b1e51c2bf78e169"
+    "commit": "329b57d05ccb45e3b1523cb08b83ae6ff547576a"
   },
   "source_snapshot": {
     "path": "native/src/qwen38_geometry_normalized_gdn_provider.cpp",
-    "sha256": "b1a74a2185a34f9d05516c41aa1d513ff2e507fd4af15528476c2a304481e1b3"
+    "sha256": "69431ea2815e9bc80fbf4186b1023aceaea778c2683f44fad048a2573d1af6ca"
   },
   "raw_evidence_policy": "Historical file URIs remain immutable references; absence of a raw artifact locally does not authorize rewriting or upgrading the claim."
 }
