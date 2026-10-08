@@ -1,0 +1,734 @@
+From 329b57d05ccb45e3b1523cb08b83ae6ff547576a Mon Sep 17 00:00:00 2001
+From: "Shuhao Zhang (Tony)" <5267690+ShuhaoZhangTony@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 07:25:11 +0000
+Subject: [PATCH] qwen38: batch eager decode tail on parent stream
+
+---
+ native/CMakeLists.txt                         |  20 +
+ .../qwen38_gdn_graph_event_policy.h           |   6 +
+ ...wen38_geometry_normalized_gdn_provider.cpp | 165 ++++---
+ ...n38_parent_local_decode_tail_benchmark.cpp | 403 ++++++++++++++++++
+ ...n38_gdn_dual_sequence_tail_policy_test.cpp |   6 +
+ 5 files changed, 549 insertions(+), 51 deletions(-)
+ create mode 100644 native/src/qwen38_parent_local_decode_tail_benchmark.cpp
+
+diff --git a/native/CMakeLists.txt b/native/CMakeLists.txt
+index 89bf9a16d..508e6d93b 100644
+--- a/native/CMakeLists.txt
++++ b/native/CMakeLists.txt
+@@ -2621,6 +2621,10 @@ add_executable(
+   statecentric_qwen38_shared_output_projection_benchmark
+   src/qwen38_shared_output_projection_benchmark.cpp
+ )
++add_executable(
++  statecentric_qwen38_parent_local_decode_tail_benchmark
++  src/qwen38_parent_local_decode_tail_benchmark.cpp
++)
+ add_executable(
+   statecentric_qwen38_split_with_size_probe
+   src/qwen38_split_with_size_probe.cpp
+@@ -2693,6 +2697,22 @@ set_target_properties(
+   statecentric_qwen38_shared_output_projection_benchmark
+   PROPERTIES BUILD_RPATH "${CANN_ROOT}/${CANN_ARCH}/lib64"
+ )
++target_include_directories(
++  statecentric_qwen38_parent_local_decode_tail_benchmark
++  SYSTEM PRIVATE "${ASCENDCL_INCLUDE_DIR}"
++)
++target_link_libraries(
++  statecentric_qwen38_parent_local_decode_tail_benchmark
++  PRIVATE "${ASCENDCL_LIBRARY}" "${OPAPI_LIBRARY}" "${NNOPBASE_LIBRARY}"
++)
++target_compile_options(
++  statecentric_qwen38_parent_local_decode_tail_benchmark
++  PRIVATE -Wall -Wextra -Wpedantic -Werror
++)
++set_target_properties(
++  statecentric_qwen38_parent_local_decode_tail_benchmark
++  PROPERTIES BUILD_RPATH "${CANN_ROOT}/${CANN_ARCH}/lib64"
++)
+ target_link_libraries(
+   statecentric_qwen38_split_with_size_probe
+   PRIVATE "${ASCENDCL_LIBRARY}" "${OPAPI_LIBRARY}" "${NNOPBASE_LIBRARY}"
+diff --git a/native/include/statecentric/qwen38_gdn_graph_event_policy.h b/native/include/statecentric/qwen38_gdn_graph_event_policy.h
+index 68c31fce5..4fd90e1d4 100644
+--- a/native/include/statecentric/qwen38_gdn_graph_event_policy.h
++++ b/native/include/statecentric/qwen38_gdn_graph_event_policy.h
+@@ -39,6 +39,12 @@ inline constexpr bool Qwen38GdnDecodeFlatOutputProjectionFeaturesValid(
+   return !decode_flat_output_projection_v18 || eager_single_follower_v17;
+ }
+ 
++inline constexpr bool Qwen38GdnParentLocalDecodeTailFeaturesValid(
++    bool decode_flat_output_projection_v18,
++    bool parent_local_decode_tail_v19) noexcept {
++  return !parent_local_decode_tail_v19 || decode_flat_output_projection_v18;
++}
++
+ // The original two-auxiliary-lane path needs five events and six waits per GDN
+ // layer. Keeping lane 0 on the parent stream removes its fork and join while
+ // preserving lane 1 overlap around the packed recurrent midpoint. V16 applies
+diff --git a/native/src/qwen38_geometry_normalized_gdn_provider.cpp b/native/src/qwen38_geometry_normalized_gdn_provider.cpp
+index 7cf3f070e..303327159 100644
+--- a/native/src/qwen38_geometry_normalized_gdn_provider.cpp
++++ b/native/src/qwen38_geometry_normalized_gdn_provider.cpp
+@@ -158,6 +158,7 @@ struct statecentric_qwen38_provider_handle_v1 {
+   bool graph_single_follower_v16 = false;
+   bool eager_single_follower_v17 = false;
+   bool decode_flat_output_projection_v18 = false;
++  bool parent_local_decode_tail_v19 = false;
+   std::atomic<std::uint64_t> packed_decode_submit_calls_v12{0};
+   std::atomic<std::uint64_t> packed_decode_admitted_calls_v12{0};
+   std::atomic<bool> packed_decode_admission_emitted_v12{false};
+@@ -172,6 +173,8 @@ struct statecentric_qwen38_provider_handle_v1 {
+   std::atomic<bool> eager_single_follower_admission_emitted_v17{false};
+   std::atomic<std::uint64_t> decode_flat_output_admissions_v18{0};
+   std::atomic<bool> decode_flat_output_admission_emitted_v18{false};
++  std::atomic<std::uint64_t> parent_local_decode_tail_admissions_v19{0};
++  std::atomic<bool> parent_local_decode_tail_admission_emitted_v19{false};
+   void* l2_gamma = nullptr;
+   std::array<void*, 128> actual_lengths{};
+   std::array<void*, 8> state_indices{};
+@@ -700,6 +703,25 @@ void EmitDecodeFlatOutputFirstAdmissionV18(
+   }
+ }
+ 
++void EmitParentLocalDecodeTailFirstAdmissionV19(
++    statecentric_qwen38_provider_handle_v1* handle) {
++  if (handle == nullptr) return;
++  std::array<char, 256> line{};
++  const int length = std::snprintf(
++      line.data(), line.size(),
++      "STATECENTRIC_QWEN38_GDN_PARENT_LOCAL_DECODE_TAIL_V19="
++      "{\"rank\":%u,\"admitted_calls\":%llu,\"rows\":2,"
++      "\"record_wait_edges_removed\":2}\n",
++      handle->rank,
++      static_cast<unsigned long long>(
++          handle->parent_local_decode_tail_admissions_v19.load(
++              std::memory_order_relaxed)));
++  if (length > 0 && static_cast<std::size_t>(length) < line.size()) {
++    WriteBestEffort(STDERR_FILENO, line.data(),
++                    static_cast<std::size_t>(length));
++  }
++}
++
+ void EmitEventPoolRuntimeTelemetryLocked(
+     statecentric_qwen38_provider_handle_v1* handle, const char* reason) {
+   if (handle == nullptr ||
+@@ -2019,6 +2041,11 @@ int32_t Create(const statecentric_qwen38_host_v1* host,
+   handle->decode_flat_output_projection_v18 =
+       decode_flat_output_projection != nullptr &&
+       std::strcmp(decode_flat_output_projection, "1") == 0;
++  const char* parent_local_decode_tail = std::getenv(
++      "STATECENTRIC_QWEN38_GDN_PARENT_LOCAL_DECODE_TAIL_V19");
++  handle->parent_local_decode_tail_v19 =
++      parent_local_decode_tail != nullptr &&
++      std::strcmp(parent_local_decode_tail, "1") == 0;
+   if (handle->parallel_batched_projection_v2 &&
+       !handle->batched_projection_v1) {
+     delete handle;
+@@ -2115,6 +2142,15 @@ int32_t Create(const statecentric_qwen38_host_v1* host,
+                 "single-follower v17",
+                 out_error);
+   }
++  if (!statecentric::Qwen38GdnParentLocalDecodeTailFeaturesValid(
++          handle->decode_flat_output_projection_v18,
++          handle->parent_local_decode_tail_v19)) {
++    delete handle;
++    return Fail(STATECENTRIC_QWEN38_INVALID_ARGUMENT,
++                "Qwen3.8 parent-local decode tail v19 requires decode flat "
++                "output projection v18",
++                out_error);
++  }
+   if ((handle->synchronization_event_pool_v3 ||
+        handle->prune_parent_projection_waits_v4) &&
+       !handle->parallel_batched_projection_v2) {
+@@ -2536,6 +2572,9 @@ int32_t Submit(statecentric_qwen38_provider_handle_v1* handle,
+         handle->decode_flat_output_projection_v18 &&
+         lane_anchored_packed_recurrent &&
+         !aggregate->model_ri_cross_stream_capture;
++    const bool parent_local_decode_tail =
++        handle->parent_local_decode_tail_v19 &&
++        decode_flat_output_projection;
+     const auto single_follower_stream_plan =
+         statecentric::PlanQwen38GdnSingleFollowerStreams(
+             aggregate->model_ri_cross_stream_capture,
+@@ -2578,6 +2617,17 @@ int32_t Submit(statecentric_qwen38_provider_handle_v1* handle,
+         EmitDecodeFlatOutputFirstAdmissionV18(handle);
+       }
+     }
++    if (parent_local_decode_tail) {
++      handle->parent_local_decode_tail_admissions_v19.fetch_add(
++          1, std::memory_order_relaxed);
++      bool expected = false;
++      if (handle->parent_local_decode_tail_admission_emitted_v19
++              .compare_exchange_strong(expected, true,
++                                       std::memory_order_acq_rel,
++                                       std::memory_order_relaxed)) {
++        EmitParentLocalDecodeTailFirstAdmissionV19(handle);
++      }
++    }
+     const auto anchor_stream =
+         single_follower_stream_plan.anchor_on_parent_stream
+             ? aggregate->stream
+@@ -2638,7 +2688,8 @@ int32_t Submit(statecentric_qwen38_provider_handle_v1* handle,
+             aggregate, static_cast<std::size_t>(tokens * kValue) *
+                            sizeof(std::uint16_t));
+       }
+-      if (batch_output_projection_only || decode_flat_output_projection) {
++      if (batch_output_projection_only ||
++          (decode_flat_output_projection && !parent_local_decode_tail)) {
+         batched_gated_output = Allocate(
+             aggregate, static_cast<std::size_t>(tokens * kValue) *
+                            sizeof(std::uint16_t));
+@@ -2925,60 +2976,72 @@ int32_t Submit(statecentric_qwen38_provider_handle_v1* handle,
+             batched_beta, batched_gate,
+             reinterpret_cast<void*>(recurrent_state.tensor.data),
+             batched_recurrent_output, anchor_stream, aggregate);
+-        const auto packed_ready = SynchronizationEvent(
+-            aggregate, 2,
+-            "aclrtCreateEvent(GDN anchored packed recurrent ready v14)");
+-        CheckAcl(aclrtRecordEvent(packed_ready, anchor_stream),
+-                 "aclrtRecordEvent(GDN anchored packed recurrent ready v14)");
+-        CheckAcl(aclrtStreamWaitEvent(follower_stream, packed_ready),
+-                 "aclrtStreamWaitEvent(GDN anchored packed recurrent ready v14)");
+-        const auto z_row_bytes =
+-            static_cast<std::size_t>(kValue) * sizeof(std::uint16_t);
+-        for (std::size_t sequence = 0; sequence < state_count; ++sequence) {
+-          const auto lane = stream_plan->lane_by_sequence[sequence];
+-          const auto sequence_stream =
+-              single_follower_stream_plan.anchor_on_parent_stream &&
+-                      sequence == 0
+-                  ? aggregate->stream
+-                  : handle->sequence_streams.at(lane);
+-          const auto token_offset = token_offsets[sequence];
+-          LaneGdnOutputTailV13(
+-              static_cast<std::uint8_t*>(batched_recurrent_output) +
+-                  token_offset * z_row_bytes,
+-              static_cast<std::uint8_t*>(batched_z) +
+-                  token_offset * z_row_bytes,
++        if (parent_local_decode_tail) {
++          BatchGdnOutputTail(
++              batched_recurrent_output, batched_z,
+               reinterpret_cast<void*>(input[8].data),
+               reinterpret_cast<void*>(input[9].data),
+-              reinterpret_cast<std::uint8_t*>(
+-                  reinterpret_cast<void*>(output.data)) +
+-                  token_offset * hidden_row_bytes,
++              reinterpret_cast<void*>(output.data),
++              lane_anchored_packed_decode_plan.batch,
+               lane_anchored_packed_decode_plan.tokens_per_sequence,
+-              kValueHeads, kValue, kHidden,
+-              decode_flat_output_projection
+-                  ? static_cast<std::uint8_t*>(batched_gated_output) +
+-                        token_offset * z_row_bytes
+-                  : nullptr,
+-              sequence_stream,
+-              aggregate->sequence_events.at(sequence));
+-          if (!single_follower_stream_plan.anchor_on_parent_stream ||
+-              sequence != 0) {
+-            const auto lane_done = SynchronizationEvent(
+-                aggregate, 3 + sequence,
+-                "aclrtCreateEvent(GDN anchored lane output done v14)");
+-            CheckAcl(aclrtRecordEvent(lane_done, sequence_stream),
+-                     "aclrtRecordEvent(GDN anchored lane output done v14)");
+-            CheckAcl(
+-                aclrtStreamWaitEvent(aggregate->stream, lane_done),
+-                "aclrtStreamWaitEvent(GDN anchored lane output done v14)");
++              kValueHeads, kValue, aggregate->stream, aggregate);
++        } else {
++          const auto packed_ready = SynchronizationEvent(
++              aggregate, 2,
++              "aclrtCreateEvent(GDN anchored packed recurrent ready v14)");
++          CheckAcl(aclrtRecordEvent(packed_ready, anchor_stream),
++                   "aclrtRecordEvent(GDN anchored packed recurrent ready v14)");
++          CheckAcl(
++              aclrtStreamWaitEvent(follower_stream, packed_ready),
++              "aclrtStreamWaitEvent(GDN anchored packed recurrent ready v14)");
++          const auto z_row_bytes =
++              static_cast<std::size_t>(kValue) * sizeof(std::uint16_t);
++          for (std::size_t sequence = 0; sequence < state_count; ++sequence) {
++            const auto lane = stream_plan->lane_by_sequence[sequence];
++            const auto sequence_stream =
++                single_follower_stream_plan.anchor_on_parent_stream &&
++                        sequence == 0
++                    ? aggregate->stream
++                    : handle->sequence_streams.at(lane);
++            const auto token_offset = token_offsets[sequence];
++            LaneGdnOutputTailV13(
++                static_cast<std::uint8_t*>(batched_recurrent_output) +
++                    token_offset * z_row_bytes,
++                static_cast<std::uint8_t*>(batched_z) +
++                    token_offset * z_row_bytes,
++                reinterpret_cast<void*>(input[8].data),
++                reinterpret_cast<void*>(input[9].data),
++                reinterpret_cast<std::uint8_t*>(
++                    reinterpret_cast<void*>(output.data)) +
++                    token_offset * hidden_row_bytes,
++                lane_anchored_packed_decode_plan.tokens_per_sequence,
++                kValueHeads, kValue, kHidden,
++                decode_flat_output_projection
++                    ? static_cast<std::uint8_t*>(batched_gated_output) +
++                          token_offset * z_row_bytes
++                    : nullptr,
++                sequence_stream,
++                aggregate->sequence_events.at(sequence));
++            if (!single_follower_stream_plan.anchor_on_parent_stream ||
++                sequence != 0) {
++              const auto lane_done = SynchronizationEvent(
++                  aggregate, 3 + sequence,
++                  "aclrtCreateEvent(GDN anchored lane output done v14)");
++              CheckAcl(aclrtRecordEvent(lane_done, sequence_stream),
++                       "aclrtRecordEvent(GDN anchored lane output done v14)");
++              CheckAcl(
++                  aclrtStreamWaitEvent(aggregate->stream, lane_done),
++                  "aclrtStreamWaitEvent(GDN anchored lane output done v14)");
++            }
++          }
++          if (decode_flat_output_projection) {
++            FlatMatmulSharedWeight(
++                batched_gated_output, reinterpret_cast<void*>(input[9].data),
++                reinterpret_cast<void*>(output.data),
++                static_cast<std::int64_t>(tokens), kValue, kHidden,
++                aggregate->stream, aggregate,
++                "aclnnMatmul(GDN flattened decode output v18)");
+           }
+-        }
+-        if (decode_flat_output_projection) {
+-          FlatMatmulSharedWeight(
+-              batched_gated_output, reinterpret_cast<void*>(input[9].data),
+-              reinterpret_cast<void*>(output.data),
+-              static_cast<std::int64_t>(tokens), kValue, kHidden,
+-              aggregate->stream, aggregate,
+-              "aclnnMatmul(GDN flattened decode output v18)");
+         }
+       } else if (batch_output_tail) {
+         BatchGdnOutputTail(
+diff --git a/native/src/qwen38_parent_local_decode_tail_benchmark.cpp b/native/src/qwen38_parent_local_decode_tail_benchmark.cpp
+new file mode 100644
+index 000000000..e90105f81
+--- /dev/null
++++ b/native/src/qwen38_parent_local_decode_tail_benchmark.cpp
+@@ -0,0 +1,403 @@
++#include <array>
++#include <chrono>
++#include <iomanip>
++#include <numeric>
++
++#define main statecentric_qwen38_dual_sequence_tail_equivalence_main
++#include "qwen38_dual_sequence_tail_equivalence_probe.cpp"
++#undef main
++
++namespace {
++
++constexpr std::int64_t kDecodeTokens = 1;
++constexpr std::uint64_t kDecodeTailWarmups = 3;
++constexpr std::uint64_t kDecodeTailSamples = 12;
++
++struct DecodeTailTiming {
++  std::string arm;
++  std::vector<double> device_us;
++  std::vector<double> host_us;
++};
++
++void EnqueueRmsNormOnStream(Runtime& runtime, const Tensor& input,
++                            const Tensor& gamma, const Tensor& output,
++                            const std::vector<std::int64_t>& rstd_shape,
++                            aclrtStream stream) {
++  std::size_t rstd_elements = 1;
++  for (const auto dimension : rstd_shape) {
++    rstd_elements *= static_cast<std::size_t>(dimension);
++  }
++  void* rstd_data = runtime.Allocate(rstd_elements * sizeof(float));
++  auto rstd = MakeContiguousTensor(rstd_shape, ACL_FLOAT, rstd_data);
++  std::uint64_t workspace_bytes = 0;
++  aclOpExecutor* executor = nullptr;
++  CheckNn(aclnnRmsNormGetWorkspaceSize(
++              input.get(), gamma.get(), 1.0e-6, output.get(), rstd.get(),
++              &workspace_bytes, &executor),
++          "aclnnRmsNormGetWorkspaceSize(parent-local decode tail)");
++  void* workspace = runtime.Allocate(workspace_bytes);
++  CheckNn(aclnnRmsNorm(workspace, workspace_bytes, executor, stream),
++          "aclnnRmsNorm(parent-local decode tail)");
++}
++
++void EnqueueSiluOnStream(Runtime& runtime, const Tensor& input,
++                         const Tensor& output, aclrtStream stream) {
++  std::uint64_t workspace_bytes = 0;
++  aclOpExecutor* executor = nullptr;
++  CheckNn(aclnnSiluGetWorkspaceSize(input.get(), output.get(),
++                                    &workspace_bytes, &executor),
++          "aclnnSiluGetWorkspaceSize(parent-local decode tail)");
++  void* workspace = runtime.Allocate(workspace_bytes);
++  CheckNn(aclnnSilu(workspace, workspace_bytes, executor, stream),
++          "aclnnSilu(parent-local decode tail)");
++}
++
++void EnqueueMulOnStream(Runtime& runtime, const Tensor& left,
++                        const Tensor& right, const Tensor& output,
++                        aclrtStream stream) {
++  std::uint64_t workspace_bytes = 0;
++  aclOpExecutor* executor = nullptr;
++  CheckNn(aclnnMulGetWorkspaceSize(left.get(), right.get(), output.get(),
++                                   &workspace_bytes, &executor),
++          "aclnnMulGetWorkspaceSize(parent-local decode tail)");
++  void* workspace = runtime.Allocate(workspace_bytes);
++  CheckNn(aclnnMul(workspace, workspace_bytes, executor, stream),
++          "aclnnMul(parent-local decode tail)");
++}
++
++struct DecodeTailFixture {
++  explicit DecodeTailFixture(std::int32_t device) : runtime(device) {
++    CheckAcl(aclrtCreateStream(&follower), "aclrtCreateStream(follower)");
++    CheckAcl(aclrtCreateEvent(&packed_ready),
++             "aclrtCreateEvent(packed ready)");
++    CheckAcl(aclrtCreateEvent(&follower_done),
++             "aclrtCreateEvent(follower done)");
++
++    const auto value_elements = static_cast<std::size_t>(kBatch * kValue);
++    const auto output_elements = static_cast<std::size_t>(kBatch * kHidden);
++    const auto recurrent_host = Generate(value_elements, 0x1931A55AU);
++    const auto z_host = Generate(value_elements, 0x18F0110BU);
++    const auto gamma_host = Generate(kHeadDim, 0x13572468U);
++    const auto weight_host = Generate(
++        static_cast<std::size_t>(kValue * kHidden), 0x24681357U);
++
++    recurrent = runtime.ToDevice(recurrent_host.data(),
++                                 recurrent_host.size() * sizeof(std::uint16_t));
++    z = runtime.ToDevice(z_host.data(),
++                         z_host.size() * sizeof(std::uint16_t));
++    gamma = runtime.ToDevice(gamma_host.data(),
++                             gamma_host.size() * sizeof(std::uint16_t));
++    weight = runtime.ToDevice(weight_host.data(),
++                              weight_host.size() * sizeof(std::uint16_t));
++
++    follower_normalized =
++        runtime.Allocate(value_elements * sizeof(std::uint16_t));
++    follower_activated =
++        runtime.Allocate(value_elements * sizeof(std::uint16_t));
++    follower_gated = runtime.Allocate(value_elements * sizeof(std::uint16_t));
++    follower_output =
++        runtime.Allocate(output_elements * sizeof(std::uint16_t));
++    parent_normalized =
++        runtime.Allocate(value_elements * sizeof(std::uint16_t));
++    parent_activated =
++        runtime.Allocate(value_elements * sizeof(std::uint16_t));
++    parent_gated = runtime.Allocate(value_elements * sizeof(std::uint16_t));
++    parent_output = runtime.Allocate(output_elements * sizeof(std::uint16_t));
++
++    gamma_tensor = MakeContiguousTensor({kHeadDim}, ACL_BF16, gamma);
++    weight_tensor = MakeTensor({kValue, kHidden}, {1, kValue},
++                               {kHidden, kValue}, ACL_BF16, weight);
++    const auto value_bytes =
++        static_cast<std::size_t>(kValue * sizeof(std::uint16_t));
++    for (std::int64_t sequence = 0; sequence < kBatch; ++sequence) {
++      const auto offset = static_cast<std::size_t>(sequence) * value_bytes;
++      follower_recurrent[sequence] = MakeContiguousTensor(
++          {kValueHeads, kHeadDim}, ACL_BF16,
++          static_cast<std::uint8_t*>(recurrent) + offset);
++      follower_normalized_heads[sequence] = MakeContiguousTensor(
++          {kValueHeads, kHeadDim}, ACL_BF16,
++          static_cast<std::uint8_t*>(follower_normalized) + offset);
++      follower_normalized_values[sequence] = MakeContiguousTensor(
++          {kDecodeTokens, kValue}, ACL_BF16,
++          static_cast<std::uint8_t*>(follower_normalized) + offset);
++      follower_z[sequence] = MakeContiguousTensor(
++          {kDecodeTokens, kValue}, ACL_BF16,
++          static_cast<std::uint8_t*>(z) + offset);
++      follower_activated_values[sequence] = MakeContiguousTensor(
++          {kDecodeTokens, kValue}, ACL_BF16,
++          static_cast<std::uint8_t*>(follower_activated) + offset);
++      follower_gated_values[sequence] = MakeContiguousTensor(
++          {kDecodeTokens, kValue}, ACL_BF16,
++          static_cast<std::uint8_t*>(follower_gated) + offset);
++    }
++
++    parent_recurrent = MakeContiguousTensor(
++        {kBatch, kValueHeads, kHeadDim}, ACL_BF16, recurrent);
++    parent_normalized_heads = MakeContiguousTensor(
++        {kBatch, kValueHeads, kHeadDim}, ACL_BF16, parent_normalized);
++    parent_normalized_values = MakeContiguousTensor(
++        {kBatch, kDecodeTokens, kValue}, ACL_BF16, parent_normalized);
++    parent_z = MakeContiguousTensor(
++        {kBatch, kDecodeTokens, kValue}, ACL_BF16, z);
++    parent_activated_values = MakeContiguousTensor(
++        {kBatch, kDecodeTokens, kValue}, ACL_BF16, parent_activated);
++    parent_gated_values = MakeContiguousTensor(
++        {kBatch, kDecodeTokens, kValue}, ACL_BF16, parent_gated);
++    follower_flat_gated = MakeContiguousTensor(
++        {kBatch, kValue}, ACL_BF16, follower_gated);
++    parent_flat_gated = MakeContiguousTensor(
++        {kBatch, kValue}, ACL_BF16, parent_gated);
++    follower_output_tensor = MakeContiguousTensor(
++        {kBatch, kHidden}, ACL_BF16, follower_output);
++    parent_output_tensor = MakeContiguousTensor(
++        {kBatch, kHidden}, ACL_BF16, parent_output);
++  }
++
++  DecodeTailFixture(const DecodeTailFixture&) = delete;
++  DecodeTailFixture& operator=(const DecodeTailFixture&) = delete;
++
++  ~DecodeTailFixture() {
++    if (follower != nullptr) (void)aclrtSynchronizeStream(follower);
++    if (follower_done != nullptr) (void)aclrtDestroyEvent(follower_done);
++    if (packed_ready != nullptr) (void)aclrtDestroyEvent(packed_ready);
++    if (follower != nullptr) (void)aclrtDestroyStream(follower);
++  }
++
++  void LaunchV18FollowerTail() {
++    CheckAcl(aclrtRecordEvent(packed_ready, runtime.stream()),
++             "aclrtRecordEvent(V18 packed ready)");
++    CheckAcl(aclrtStreamWaitEvent(follower, packed_ready),
++             "aclrtStreamWaitEvent(V18 packed ready)");
++    LaunchLane(0, runtime.stream());
++    LaunchLane(1, follower);
++    CheckAcl(aclrtRecordEvent(follower_done, follower),
++             "aclrtRecordEvent(V18 follower done)");
++    CheckAcl(aclrtStreamWaitEvent(runtime.stream(), follower_done),
++             "aclrtStreamWaitEvent(V18 follower done)");
++    EnqueueMatmul(runtime, follower_flat_gated, weight_tensor,
++                  follower_output_tensor);
++  }
++
++  void LaunchParentLocalTail() {
++    EnqueueRmsNorm(runtime, parent_recurrent, gamma_tensor,
++                   parent_normalized_heads, {kBatch, kValueHeads, 1});
++    EnqueueSilu(runtime, parent_z, parent_activated_values);
++    EnqueueMul(runtime, parent_activated_values, parent_normalized_values,
++               parent_gated_values);
++    EnqueueMatmul(runtime, parent_flat_gated, weight_tensor,
++                  parent_output_tensor);
++  }
++
++  void Synchronize() {
++    runtime.Synchronize();
++    CheckAcl(aclrtSynchronizeStream(follower),
++             "aclrtSynchronizeStream(follower)");
++  }
++
++  void LaunchLane(std::size_t sequence, aclrtStream stream) {
++    EnqueueRmsNormOnStream(runtime, follower_recurrent[sequence], gamma_tensor,
++                           follower_normalized_heads[sequence],
++                           {kValueHeads, 1}, stream);
++    EnqueueSiluOnStream(runtime, follower_z[sequence],
++                        follower_activated_values[sequence], stream);
++    EnqueueMulOnStream(runtime, follower_activated_values[sequence],
++                       follower_normalized_values[sequence],
++                       follower_gated_values[sequence], stream);
++  }
++
++  Runtime runtime;
++  aclrtStream follower = nullptr;
++  aclrtEvent packed_ready = nullptr;
++  aclrtEvent follower_done = nullptr;
++  void* recurrent = nullptr;
++  void* z = nullptr;
++  void* gamma = nullptr;
++  void* weight = nullptr;
++  void* follower_normalized = nullptr;
++  void* follower_activated = nullptr;
++  void* follower_gated = nullptr;
++  void* follower_output = nullptr;
++  void* parent_normalized = nullptr;
++  void* parent_activated = nullptr;
++  void* parent_gated = nullptr;
++  void* parent_output = nullptr;
++  Tensor gamma_tensor;
++  Tensor weight_tensor;
++  std::array<Tensor, kBatch> follower_recurrent;
++  std::array<Tensor, kBatch> follower_normalized_heads;
++  std::array<Tensor, kBatch> follower_normalized_values;
++  std::array<Tensor, kBatch> follower_z;
++  std::array<Tensor, kBatch> follower_activated_values;
++  std::array<Tensor, kBatch> follower_gated_values;
++  Tensor parent_recurrent;
++  Tensor parent_normalized_heads;
++  Tensor parent_normalized_values;
++  Tensor parent_z;
++  Tensor parent_activated_values;
++  Tensor parent_gated_values;
++  Tensor follower_flat_gated;
++  Tensor parent_flat_gated;
++  Tensor follower_output_tensor;
++  Tensor parent_output_tensor;
++};
++
++double DecodeTailPercentile(std::vector<double> values, double quantile) {
++  if (values.empty()) throw std::runtime_error("empty timing sample set");
++  std::sort(values.begin(), values.end());
++  const double position = quantile * static_cast<double>(values.size() - 1);
++  const auto lower = static_cast<std::size_t>(position);
++  const auto upper = std::min(lower + 1, values.size() - 1);
++  const double fraction = position - static_cast<double>(lower);
++  return values[lower] * (1.0 - fraction) + values[upper] * fraction;
++}
++
++double DecodeTailMean(const std::vector<double>& values) {
++  return std::accumulate(values.begin(), values.end(), 0.0) /
++         static_cast<double>(values.size());
++}
++
++template <typename Launch>
++DecodeTailTiming TimeDecodeTail(std::string arm, DecodeTailFixture* fixture,
++                                Launch launch) {
++  for (std::uint64_t index = 0; index < kDecodeTailWarmups; ++index) {
++    launch();
++    fixture->Synchronize();
++  }
++  aclrtEvent start = nullptr;
++  aclrtEvent end = nullptr;
++  CheckAcl(aclrtCreateEvent(&start), "aclrtCreateEvent(start)");
++  CheckAcl(aclrtCreateEvent(&end), "aclrtCreateEvent(end)");
++  DecodeTailTiming timing{std::move(arm), {}, {}};
++  try {
++    for (std::uint64_t index = 0; index < kDecodeTailSamples; ++index) {
++      const auto host_start = std::chrono::steady_clock::now();
++      CheckAcl(aclrtRecordEvent(start, fixture->runtime.stream()),
++               "aclrtRecordEvent(start)");
++      launch();
++      CheckAcl(aclrtRecordEvent(end, fixture->runtime.stream()),
++               "aclrtRecordEvent(end)");
++      fixture->Synchronize();
++      const auto host_end = std::chrono::steady_clock::now();
++      float elapsed_ms = 0.0F;
++      CheckAcl(aclrtEventElapsedTime(&elapsed_ms, start, end),
++               "aclrtEventElapsedTime");
++      timing.device_us.push_back(static_cast<double>(elapsed_ms) * 1000.0);
++      timing.host_us.push_back(
++          std::chrono::duration<double, std::micro>(host_end - host_start)
++              .count());
++    }
++  } catch (...) {
++    (void)aclrtDestroyEvent(end);
++    (void)aclrtDestroyEvent(start);
++    throw;
++  }
++  CheckAcl(aclrtDestroyEvent(end), "aclrtDestroyEvent(end)");
++  CheckAcl(aclrtDestroyEvent(start), "aclrtDestroyEvent(start)");
++  return timing;
++}
++
++void EmitDecodeTailTiming(const DecodeTailTiming& timing, bool comma) {
++  const auto emit = [](const std::vector<double>& values) {
++    std::cout << "{\"mean\":" << DecodeTailMean(values)
++              << ",\"p50\":" << DecodeTailPercentile(values, 0.5)
++              << ",\"p95\":" << DecodeTailPercentile(values, 0.95)
++              << ",\"min\":" << *std::min_element(values.begin(), values.end())
++              << ",\"max\":" << *std::max_element(values.begin(), values.end())
++              << '}';
++  };
++  std::cout << "{\"arm\":\"" << timing.arm << "\",\"device_us\":";
++  emit(timing.device_us);
++  std::cout << ",\"host_us\":";
++  emit(timing.host_us);
++  std::cout << '}' << (comma ? "," : "");
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++  try {
++    const auto device = argc > 1 ? std::stoi(argv[1]) : 4;
++    if (device < 0 || device > 15) {
++      throw std::runtime_error("device must be in [0,15]");
++    }
++    DecodeTailFixture fixture(device);
++    fixture.LaunchV18FollowerTail();
++    fixture.Synchronize();
++    fixture.LaunchParentLocalTail();
++    fixture.Synchronize();
++    const auto output_elements = static_cast<std::size_t>(kBatch * kHidden);
++    const auto comparison = Compare(
++        "parent-local-tail",
++        CopyBack(fixture.follower_output, output_elements),
++        CopyBack(fixture.parent_output, output_elements));
++
++    const auto c0 = TimeDecodeTail("C0-v18-follower-tail", &fixture, [&] {
++      fixture.LaunchV18FollowerTail();
++    });
++    const auto h0 = TimeDecodeTail("H0-parent-local-tail", &fixture, [&] {
++      fixture.LaunchParentLocalTail();
++    });
++    const auto h1 = TimeDecodeTail("H1-parent-local-tail", &fixture, [&] {
++      fixture.LaunchParentLocalTail();
++    });
++    const auto c1 = TimeDecodeTail("C1-v18-follower-tail", &fixture, [&] {
++      fixture.LaunchV18FollowerTail();
++    });
++    const auto p50 = [](const DecodeTailTiming& timing,
++                        const std::vector<double> DecodeTailTiming::*member) {
++      return DecodeTailPercentile(timing.*member, 0.5);
++    };
++    const double control_device =
++        (p50(c0, &DecodeTailTiming::device_us) +
++         p50(c1, &DecodeTailTiming::device_us)) /
++        2.0;
++    const double candidate_device =
++        (p50(h0, &DecodeTailTiming::device_us) +
++         p50(h1, &DecodeTailTiming::device_us)) /
++        2.0;
++    const double control_host =
++        (p50(c0, &DecodeTailTiming::host_us) +
++         p50(c1, &DecodeTailTiming::host_us)) /
++        2.0;
++    const double candidate_host =
++        (p50(h0, &DecodeTailTiming::host_us) +
++         p50(h1, &DecodeTailTiming::host_us)) /
++        2.0;
++    const bool exact = comparison.mismatched == 0 &&
++                       comparison.max_abs == 0.0;
++
++    std::cout << std::setprecision(12)
++              << "{\"schema\":\"statecentric-qwen38-parent-local-decode-tail-"
++                 "benchmark-v1\",\"device\":"
++              << device << ",\"batch\":" << kBatch
++              << ",\"tokens_per_sequence\":" << kDecodeTokens
++              << ",\"warmups_per_arm\":" << kDecodeTailWarmups
++              << ",\"samples_per_arm\":" << kDecodeTailSamples
++              << ",\"removed_record_wait_edges\":2,\"arms\":[";
++    EmitDecodeTailTiming(c0, true);
++    EmitDecodeTailTiming(h0, true);
++    EmitDecodeTailTiming(h1, true);
++    EmitDecodeTailTiming(c1, false);
++    std::cout << "],\"correctness\":{\"output_elements\":"
++              << comparison.elements << ",\"mismatched\":"
++              << comparison.mismatched << ",\"max_abs\":"
++              << comparison.max_abs << ",\"exact\":"
++              << (exact ? "true" : "false")
++              << "},\"comparison\":{\"control_device_p50_us\":"
++              << control_device << ",\"candidate_device_p50_us\":"
++              << candidate_device << ",\"device_improvement\":"
++              << control_device / candidate_device - 1.0
++              << ",\"control_host_p50_us\":" << control_host
++              << ",\"candidate_host_p50_us\":" << candidate_host
++              << ",\"host_improvement\":"
++              << control_host / candidate_host - 1.0
++              << "},\"exact\":" << (exact ? "true" : "false")
++              << ",\"component_only\":true,"
++                 "\"online_performance_claim_permitted\":false}\n";
++    return exact ? 0 : 1;
++  } catch (const std::exception& error) {
++    std::cerr << "Qwen3.8 parent-local decode tail benchmark failed: "
++              << error.what() << '\n';
++    return 2;
++  }
++}
+diff --git a/native/tests/qwen38_gdn_dual_sequence_tail_policy_test.cpp b/native/tests/qwen38_gdn_dual_sequence_tail_policy_test.cpp
+index 0eb215fd8..49e87daed 100644
+--- a/native/tests/qwen38_gdn_dual_sequence_tail_policy_test.cpp
++++ b/native/tests/qwen38_gdn_dual_sequence_tail_policy_test.cpp
+@@ -37,6 +37,12 @@ int main() {
+                                                                       true) ||
+       statecentric::Qwen38GdnDecodeFlatOutputProjectionFeaturesValid(false,
+                                                                      true) ||
++      !statecentric::Qwen38GdnParentLocalDecodeTailFeaturesValid(true,
++                                                                 true) ||
++      !statecentric::Qwen38GdnParentLocalDecodeTailFeaturesValid(false,
++                                                                 false) ||
++      statecentric::Qwen38GdnParentLocalDecodeTailFeaturesValid(false,
++                                                                true) ||
+       !single_follower.anchor_on_parent_stream ||
+       !single_follower.follower_on_auxiliary_stream ||
+       single_follower.synchronization_events != 4 ||
+-- 
+2.34.1
+

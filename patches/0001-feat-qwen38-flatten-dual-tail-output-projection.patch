@@ -1,0 +1,190 @@
+From 1498f464c27c29101bf2ff974dc4c358613f3332 Mon Sep 17 00:00:00 2001
+From: "Shuhao Zhang (Tony)" <5267690+ShuhaoZhangTony@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 16:43:18 +0000
+Subject: [PATCH] feat(qwen38): flatten dual-tail output projection
+
+---
+ .../qwen38_dual_sequence_tail_benchmark.cpp   | 60 ++++++++++++++++++-
+ ...wen38_geometry_normalized_gdn_provider.cpp |  6 +-
+ 2 files changed, 61 insertions(+), 5 deletions(-)
+
+diff --git a/native/src/qwen38_dual_sequence_tail_benchmark.cpp b/native/src/qwen38_dual_sequence_tail_benchmark.cpp
+index 27e53e1ee..85e1e072b 100644
+--- a/native/src/qwen38_dual_sequence_tail_benchmark.cpp
++++ b/native/src/qwen38_dual_sequence_tail_benchmark.cpp
+@@ -53,6 +53,7 @@ struct TailBenchmarkFixture {
+         runtime.Allocate(value_elements * sizeof(std::uint16_t));
+     batched_gated = runtime.Allocate(value_elements * sizeof(std::uint16_t));
+     batched_output = runtime.Allocate(output_elements * sizeof(std::uint16_t));
++    flat_output = runtime.Allocate(output_elements * sizeof(std::uint16_t));
+ 
+     gamma_tensor = MakeContiguousTensor({kHeadDim}, ACL_BF16, gamma);
+     sequential_weight = MakeTensor({kValue, kHidden}, {1, kValue},
+@@ -106,6 +107,10 @@ struct TailBenchmarkFixture {
+         {1, kHidden, kValue}, ACL_BF16, weight);
+     batched_output_tensor = MakeContiguousTensor(
+         {kBatch, kTokens, kHidden}, ACL_BF16, batched_output);
++    flat_gated_values = MakeContiguousTensor(
++        {kBatch * kTokens, kValue}, ACL_BF16, batched_gated);
++    flat_output_tensor = MakeContiguousTensor(
++        {kBatch * kTokens, kHidden}, ACL_BF16, flat_output);
+   }
+ 
+   void LaunchSequential() {
+@@ -134,6 +139,17 @@ struct TailBenchmarkFixture {
+                        batched_output_tensor);
+   }
+ 
++  void LaunchFlatBatched() {
++    EnqueueRmsNorm(runtime, batched_recurrent_tensor, gamma_tensor,
++                   batched_normalized_heads,
++                   {kBatch, kTokens * kValueHeads, 1});
++    EnqueueSilu(runtime, batched_z_tensor, batched_activated_values);
++    EnqueueMul(runtime, batched_activated_values, batched_normalized_values,
++               batched_gated_values);
++    EnqueueMatmul(runtime, flat_gated_values, sequential_weight,
++                  flat_output_tensor);
++  }
++
+   Runtime runtime;
+   void* recurrent = nullptr;
+   void* z = nullptr;
+@@ -147,6 +163,7 @@ struct TailBenchmarkFixture {
+   void* batched_activated = nullptr;
+   void* batched_gated = nullptr;
+   void* batched_output = nullptr;
++  void* flat_output = nullptr;
+   Tensor gamma_tensor;
+   Tensor sequential_weight;
+   std::array<Tensor, kBatch> sequential_recurrent;
+@@ -164,6 +181,8 @@ struct TailBenchmarkFixture {
+   Tensor batched_gated_values;
+   Tensor batched_weight;
+   Tensor batched_output_tensor;
++  Tensor flat_gated_values;
++  Tensor flat_output_tensor;
+ };
+ 
+ double Percentile(std::vector<double> values, double quantile) {
+@@ -253,6 +272,10 @@ int main(int argc, char** argv) {
+                               [&] { fixture.LaunchSequential(); });
+     const auto h0 = RunTiming("H0-batched", &fixture,
+                               [&] { fixture.LaunchBatched(); });
++    const auto f0 = RunTiming("F0-flat-batched", &fixture,
++                              [&] { fixture.LaunchFlatBatched(); });
++    const auto f1 = RunTiming("F1-flat-batched", &fixture,
++                              [&] { fixture.LaunchFlatBatched(); });
+     const auto h1 = RunTiming("H1-batched", &fixture,
+                               [&] { fixture.LaunchBatched(); });
+     const auto c1 = RunTiming("C1-sequential", &fixture,
+@@ -262,32 +285,43 @@ int main(int argc, char** argv) {
+     const auto comparison = Compare(
+         "output", CopyBack(fixture.sequential_output, output_elements),
+         CopyBack(fixture.batched_output, output_elements));
++    const auto flat_comparison = Compare(
++        "flat-output", CopyBack(fixture.sequential_output, output_elements),
++        CopyBack(fixture.flat_output, output_elements));
+     const double control_device =
+         (Percentile(c0.device_us, 0.5) + Percentile(c1.device_us, 0.5)) / 2.0;
+     const double candidate_device =
+         (Percentile(h0.device_us, 0.5) + Percentile(h1.device_us, 0.5)) / 2.0;
++    const double flat_device =
++        (Percentile(f0.device_us, 0.5) + Percentile(f1.device_us, 0.5)) / 2.0;
+     const double control_host =
+         (Percentile(c0.host_us, 0.5) + Percentile(c1.host_us, 0.5)) / 2.0;
+     const double candidate_host =
+         (Percentile(h0.host_us, 0.5) + Percentile(h1.host_us, 0.5)) / 2.0;
++    const double flat_host =
++        (Percentile(f0.host_us, 0.5) + Percentile(f1.host_us, 0.5)) / 2.0;
+     const bool device_direction_consistent =
+         Percentile(h0.device_us, 0.5) < control_device &&
+         Percentile(h1.device_us, 0.5) < control_device;
+     const bool host_no_material_regression = candidate_host <= control_host * 1.01;
+     const bool supported = comparison.mismatched == 0 &&
++                           flat_comparison.mismatched == 0 &&
+                            device_direction_consistent &&
+                            host_no_material_regression;
+     std::cout << std::setprecision(12)
+               << "{\"schema\":\"statecentric-qwen38-dual-sequence-tail-"
+-                 "benchmark-v1\",\"device\":"
++                 "benchmark-v2\",\"device\":"
+               << device << ",\"batch\":" << kBatch
+               << ",\"tokens_per_sequence\":" << kTokens
+               << ",\"warmups_per_arm\":" << kBenchmarkWarmups
+               << ",\"samples_per_arm\":" << kBenchmarkSamples
+               << ",\"order\":[\"C0-sequential\",\"H0-batched\","
++                 "\"F0-flat-batched\",\"F1-flat-batched\","
+                  "\"H1-batched\",\"C1-sequential\"],\"arms\":[";
+     EmitTiming(c0, true);
+     EmitTiming(h0, true);
++    EmitTiming(f0, true);
++    EmitTiming(f1, true);
+     EmitTiming(h1, true);
+     EmitTiming(c1, false);
+     std::cout << "],\"correctness\":{\"output_elements\":"
+@@ -297,14 +331,32 @@ int main(int argc, char** argv) {
+               << (comparison.mismatched == 0 && comparison.max_abs == 0.0
+                       ? "true"
+                       : "false")
++              << "},\"flat_correctness\":{\"output_elements\":"
++              << flat_comparison.elements << ",\"mismatched\":"
++              << flat_comparison.mismatched << ",\"max_abs\":"
++              << flat_comparison.max_abs << ",\"exact\":"
++              << (flat_comparison.mismatched == 0 &&
++                          flat_comparison.max_abs == 0.0
++                      ? "true"
++                      : "false")
+               << "},\"comparison\":{\"control_device_p50_us\":"
+               << control_device << ",\"candidate_device_p50_us\":"
+               << candidate_device << ",\"device_improvement\":"
+               << control_device / candidate_device - 1.0
++              << ",\"flat_device_p50_us\":" << flat_device
++              << ",\"flat_device_improvement\":"
++              << control_device / flat_device - 1.0
++              << ",\"flat_vs_batch_device_improvement\":"
++              << candidate_device / flat_device - 1.0
+               << ",\"control_host_p50_us\":" << control_host
+               << ",\"candidate_host_p50_us\":" << candidate_host
+               << ",\"host_improvement\":"
+               << control_host / candidate_host - 1.0
++              << ",\"flat_host_p50_us\":" << flat_host
++              << ",\"flat_host_improvement\":"
++              << control_host / flat_host - 1.0
++              << ",\"flat_vs_batch_host_improvement\":"
++              << candidate_host / flat_host - 1.0
+               << ",\"device_direction_consistent\":"
+               << (device_direction_consistent ? "true" : "false")
+               << ",\"host_no_material_regression\":"
+@@ -313,7 +365,11 @@ int main(int argc, char** argv) {
+               << (supported ? "true" : "false")
+               << "},\"component_only\":true,"
+                  "\"online_performance_claim_permitted\":false}\n";
+-    return comparison.mismatched == 0 && comparison.max_abs == 0.0 ? 0 : 1;
++    return comparison.mismatched == 0 && comparison.max_abs == 0.0 &&
++                   flat_comparison.mismatched == 0 &&
++                   flat_comparison.max_abs == 0.0
++               ? 0
++               : 1;
+   } catch (const std::exception& error) {
+     std::cerr << "Qwen3.8 dual-sequence tail benchmark failed: "
+               << error.what() << '\n';
+diff --git a/native/src/qwen38_geometry_normalized_gdn_provider.cpp b/native/src/qwen38_geometry_normalized_gdn_provider.cpp
+index 2232f9a7e..7cf3f070e 100644
+--- a/native/src/qwen38_geometry_normalized_gdn_provider.cpp
++++ b/native/src/qwen38_geometry_normalized_gdn_provider.cpp
+@@ -1470,9 +1470,9 @@ void BatchGdnOutputTail(void* recurrent_output_data, void* z_data,
+   void* mul_workspace = GDN_WORKSPACE(event, mul_bytes, kElementwiseWorkspace);
+   CheckNn(aclnnMul(mul_workspace, mul_bytes, mul_executor, stream),
+           "aclnnMul(GDN dual-sequence tail v10)");
+-  BatchMatmulSharedWeight(
+-      gated_data, weight_data, output_data, batch, tokens, value, kHidden,
+-      stream, event, "aclnnBatchMatMul(GDN dual-sequence output v10)");
++  FlatMatmulSharedWeight(
++      gated_data, weight_data, output_data, batch * tokens, value, kHidden,
++      stream, event, "aclnnMatmul(GDN flattened dual-sequence output v10)");
+ }
+ 
+ void Permute(const std::vector<std::int64_t>& input_shape,
+-- 
+2.34.1
+
