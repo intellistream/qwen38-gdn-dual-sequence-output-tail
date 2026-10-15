@@ -1,0 +1,13 @@
+{
+  "schema_version": "vllm-hust-mod-metadata-v1",
+  "mod_id": "org.vllm-hust.qwen38-gdn-dual-sequence-output-tail",
+  "canonical_repository": "intellistream/qwen38-gdn-dual-sequence-output-tail",
+  "organization": "intellistream",
+  "maintainers": ["ShuhaoZhangTony"],
+  "advisor_status": "none",
+  "advisors": [],
+  "lifecycle_status": "deprecated",
+  "default_enabled": false,
+  "performance_status": "unqualified",
+  "website_visibility": "excluded"
+}

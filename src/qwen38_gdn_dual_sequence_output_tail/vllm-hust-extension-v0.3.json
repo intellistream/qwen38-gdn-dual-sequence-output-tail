@@ -1,0 +1,52 @@
+{
+  "schema_version": "0.3-experimental",
+  "extension_id": "org.vllm-hust.qwen38-gdn-dual-sequence-output-tail",
+  "extension_version": "0.1.2",
+  "kind": "runtime_bridge",
+  "host": {
+    "provider": "stateaxis",
+    "name": "stateaxis",
+    "version_range": ">=0.3.0.dev30,<0.4",
+    "api_range": ">=1,<2"
+  },
+  "runtime": {
+    "type": "python",
+    "process_scope": "stateaxis_processes",
+    "isolation": "trusted_in_process"
+  },
+  "lifecycle_owner": "host",
+  "protocols": [
+    {
+      "name": "stateaxis.archived-native-patch",
+      "version_range": ">=1,<2"
+    }
+  ],
+  "implementation": [
+    {
+      "type": "host_builtin",
+      "contract": "qwen38-gdn-dual-sequence-output-tail-deprecated",
+      "effect_counters": ["vllm:stateaxis_mod_effects"],
+      "required_effect_labels": ["selected", "fallback"]
+    }
+  ],
+  "requires_services": [],
+  "requires_extensions": [],
+  "resource_claims": [
+    {
+      "resource": "stateaxis.runtime.qwen38-gdn-output-tail",
+      "scope": "stateaxis-process",
+      "mode": "exclusive"
+    }
+  ],
+  "activation": {
+    "additional_config": {
+      "stateaxis_mod": {
+        "mod_id": "qwen38.gdn-dual-sequence-output-tail",
+        "version": "0.1.2",
+        "performance_qualified": false,
+        "deprecated": true,
+        "enabled": false
+      }
+    }
+  }
+}
