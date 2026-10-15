@@ -1,5 +1,10 @@
 # Qwen3.8 dual-sequence GDN output-tail batching (corrected)
 
+This archived mod ships an ECPA Manifest 0.3 carrier under the canonical extension identity
+`org.vllm-hust.qwen38-gdn-dual-sequence-output-tail`. It remains deprecated, disabled by default,
+performance-unqualified, and excluded from the public mod catalog; packaging does not promote the
+historical component result into an end-to-end claim.
+
 Corrects the V10 activation record: r210 did not forward the feature flag into workers, while activation-fixed r215 batches the full stateless output tail only as an explicitly deprecated experiment.
 
 ## Status

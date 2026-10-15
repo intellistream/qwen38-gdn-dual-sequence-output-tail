@@ -9,10 +9,20 @@ description = "Evidence-bound Qwen3.8 GDN native optimization mod"
 requires-python = ">=3.10"
 
 [project.optional-dependencies]
-test = ["jsonschema>=4.23", "pytest>=8"]
+test = [
+  "jsonschema>=4.23",
+  "pytest>=8",
+  "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@07215d9b2a4f37d5d89739b2aff8f622b2866448",
+]
 
-[tool.setuptools]
-packages = []
+[project.entry-points."vllm_hust.extension_bundles"]
+"org.vllm-hust.qwen38-gdn-dual-sequence-output-tail" = "qwen38_gdn_dual_sequence_output_tail"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+qwen38_gdn_dual_sequence_output_tail = ["vllm-hust-extension-v0.3.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
