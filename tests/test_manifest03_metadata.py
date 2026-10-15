@@ -19,8 +19,13 @@ def test_archived_mod_has_manifest03_carrier_and_direct_owner() -> None:
 
     metadata = json.loads((ROOT / "MOD_METADATA.json").read_text())
     assert metadata["mod_id"] == descriptor.bundle_id
-    assert metadata["maintainers"] == ["ShuhaoZhangTony"]
-    assert metadata["advisor_status"] == "none"
-    assert metadata["advisors"] == []
-    assert metadata["lifecycle_status"] == "deprecated"
-    assert metadata["website_visibility"] == "excluded"
+    responsibility = metadata["responsibility"]
+    assert [item["github"] for item in responsibility["maintainers"]] == [
+        "ShuhaoZhangTony"
+    ]
+    assert responsibility["advisor_status"] == "none"
+    assert responsibility["advisors"] == []
+    assert metadata["lifecycle"]["status"] == "deprecated"
+    assert metadata["lifecycle"]["default_enabled"] is False
+    assert "public MOD-page listing" in metadata["scope"]["out_of_scope"]
+    assert metadata["evidence"]["qualification"] == "deprecated-unqualified"

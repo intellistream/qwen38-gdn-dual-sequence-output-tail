@@ -1,13 +1,47 @@
 {
   "schema_version": "vllm-hust-mod-metadata-v1",
   "mod_id": "org.vllm-hust.qwen38-gdn-dual-sequence-output-tail",
-  "canonical_repository": "intellistream/qwen38-gdn-dual-sequence-output-tail",
-  "organization": "intellistream",
-  "maintainers": ["ShuhaoZhangTony"],
-  "advisor_status": "none",
-  "advisors": [],
-  "lifecycle_status": "deprecated",
-  "default_enabled": false,
-  "performance_status": "unqualified",
-  "website_visibility": "excluded"
+  "repository": "qwen38-gdn-dual-sequence-output-tail",
+  "display_name": "Qwen3.8 GDN dual-sequence output tail",
+  "canonical_repository": "https://github.com/intellistream/qwen38-gdn-dual-sequence-output-tail",
+  "responsibility": {
+    "organization": "intellistream",
+    "maintainers": [
+      {
+        "name": "Shuhao Zhang (Tony)",
+        "github": "ShuhaoZhangTony"
+      }
+    ],
+    "advisor_status": "none",
+    "advisors": []
+  },
+  "lifecycle": {
+    "status": "deprecated",
+    "default_enabled": false,
+    "activation_contract": "Manifest 0.3 exposes this archived host-built contract for discovery only; it has no default or public-catalog activation path.",
+    "rollback_contract": "Omit or disable the extension and retain the unmodified per-sequence output tail."
+  },
+  "scope": {
+    "mechanism": "two-sequence flattening of the stateless Qwen3.8 GDN output tail",
+    "supported_workloads": [
+      "archived Qwen3.8-27B component reproduction at the pinned 2x64 geometry"
+    ],
+    "out_of_scope": [
+      "public MOD-page listing",
+      "default activation",
+      "general or inherited end-to-end performance claims"
+    ]
+  },
+  "evidence": {
+    "qualification": "deprecated-unqualified",
+    "latest_result": "evidence/2026-10-05-component-screen.md",
+    "index": "README.md",
+    "performance_claims": [
+      {
+        "label": "component-positive-online-negative",
+        "scope": "pinned Qwen3.8 GDN output-tail component and historical bounded BFCL-multiple screen",
+        "result": "The flattened component was exact and faster, while the activation-fixed matched online screen regressed; no end-to-end gain is qualified."
+      }
+    ]
+  }
 }
